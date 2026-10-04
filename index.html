@@ -2,9 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>LocalDeck</title>
+    <script>
+      // Runs before React mounts so the first paint already has the right
+      // theme and platform. The saved setting and the scanner's platform
+      // replace these defaults once the backend answers.
+      (function () {
+        try {
+          var root = document.documentElement;
+          var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          root.classList.toggle("dark", dark);
+          var ua = navigator.userAgent || "";
+          root.dataset.platform = /Macintosh|Mac OS X/i.test(ua)
+            ? "macos"
+            : /Linux|X11/i.test(ua)
+              ? "linux"
+              : "other";
+        } catch (_) {
+          /* defaults from CSS apply */
+        }
+      })();
+    </script>
   </head>
 
   <body>

@@ -1,0 +1,3 @@
+[test]
+# Registers happy-dom, jest-dom matchers, the fake Tauri backend and per-test cleanup.
+preload = ["./src/test/setup.ts"]

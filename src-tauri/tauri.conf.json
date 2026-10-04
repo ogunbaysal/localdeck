@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "localdeck",
+  "productName": "LocalDeck",
   "version": "0.1.0",
-  "identifier": "ogunbaysal/localdeck",
+  "identifier": "com.ogunbaysal.localdeck",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,18 +12,42 @@
   "app": {
     "windows": [
       {
-        "title": "localdeck",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "LocalDeck",
+        "width": 1040,
+        "height": 700,
+        "minWidth": 720,
+        "minHeight": 480,
+        "center": true,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost ws://localhost:1420 http://localhost:1420"
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Project-centric control center for local development",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
