@@ -39,11 +39,15 @@ pub fn open_in_editor(_editor_id: &str, _path: &Path) -> AppResult<()> {
     unsupported()
 }
 
-pub fn open_terminal(_path: &Path) -> AppResult<()> {
+pub fn detect_terminals() -> Vec<crate::models::TerminalInfo> {
+    Vec::new()
+}
+
+pub fn open_terminal(_path: &Path, _terminal_id: Option<&str>) -> AppResult<()> {
     unsupported()
 }
 
-pub fn spawn_managed(_command: &PrimaryCommand) -> AppResult<Child> {
+pub fn spawn_managed(_command: &PrimaryCommand, _env: &[(String, String)]) -> AppResult<Child> {
     unsupported()
 }
 

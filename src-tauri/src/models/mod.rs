@@ -11,6 +11,7 @@ mod process;
 mod project;
 mod settings;
 mod snapshot;
+mod transfer;
 
 pub use action::{ProcessFailure, StopReport};
 pub use activity::{ActivityEvent, ActivityKind, ActivityMetadata};
@@ -18,11 +19,13 @@ pub use component::{Component, ComponentKind, ComponentStatus, Metrics};
 pub use port::{HttpState, PortInfo, PortOwnership, PortProcess, Transport};
 pub use process::{AccessLevel, ProcessInfo, ProcessOrigin};
 pub use project::{
-    AttentionItem, AttentionKind, PackageManager, PackageScript, PrimaryCommand, PrimaryUrl,
-    PrimaryUrlSource, Project, ProjectOverrides, ProjectScripts, RootKind, RuntimeStatus, StackTag,
+    AttentionItem, AttentionKind, LaunchProfile, LaunchProfileInput, PackageManager, PackageScript,
+    PrimaryCommand, PrimaryUrl, PrimaryUrlSource, Project, ProjectOverrides, ProjectScripts,
+    RootKind, RuntimeStatus, StackTag, StartOption, StartSource,
 };
-pub use settings::{EditorInfo, Settings, Theme};
+pub use settings::{EditorInfo, Settings, TerminalInfo, Theme};
 pub use snapshot::{AccessSummary, AppSnapshot, Platform, ScannerStatus};
+pub use transfer::{ImportReport, ImportSkip};
 
 /// Database identity of a project (stable across restarts).
 pub type ProjectId = i64;

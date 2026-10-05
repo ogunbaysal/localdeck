@@ -133,7 +133,14 @@ export function makeProject(overrides: Partial<Project> = {}): Project {
     ports: [],
     primaryUrl: null,
     primaryCommand: null,
-    overrides: { displayName: null, primaryUrl: null, preferredEditor: null },
+    launchProfiles: [],
+    overrides: {
+      displayName: null,
+      primaryUrl: null,
+      preferredEditor: null,
+      preferredTerminal: null,
+      autoRestart: false,
+    },
     metrics: makeMetrics(),
     firstSeenAt: FIXTURE_NOW - 86_400_000,
     lastSeenAt: FIXTURE_NOW,
@@ -192,6 +199,9 @@ export function makeSettings(overrides: Partial<Settings> = {}): Settings {
     launchAtLogin: false,
     preferredEditor: null,
     forgetAfterDays: null,
+    preferredTerminal: null,
+    notificationsEnabled: true,
+    globalShortcut: null,
     ...overrides,
   };
 }

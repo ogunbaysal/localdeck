@@ -120,7 +120,8 @@ fn mutating_commands_accept_camel_case_arguments_and_show_up_in_the_next_snapsho
         &h,
         "set_project_override",
         json!({ "projectId": id, "overrides": {
-            "displayName": "Renamed", "primaryUrl": "localhost:4321", "preferredEditor": null } }),
+            "displayName": "Renamed", "primaryUrl": "localhost:4321", "preferredEditor": null,
+            "preferredTerminal": null, "autoRestart": true } }),
     )
     .unwrap();
     call(
@@ -132,7 +133,7 @@ fn mutating_commands_accept_camel_case_arguments_and_show_up_in_the_next_snapsho
     call(
         &h,
         "set_primary_command",
-        json!({ "projectId": id, "script": "dev" }),
+        json!({ "projectId": id, "option": "pkg:dev" }),
     )
     .unwrap();
     call(
@@ -153,6 +154,7 @@ fn mutating_commands_accept_camel_case_arguments_and_show_up_in_the_next_snapsho
     assert_eq!(project["ignored"], true);
     assert_eq!(project["overrides"]["primaryUrl"], "http://localhost:4321");
     assert_eq!(project["primaryUrl"]["source"], "override");
+    assert_eq!(project["overrides"]["autoRestart"], true);
     assert_eq!(project["primaryCommand"]["program"], "npm");
     assert_eq!(project["primaryCommand"]["args"], json!(["run", "dev"]));
 }
@@ -168,10 +170,8 @@ fn scripts_and_editors_have_the_documented_shapes() {
     .unwrap();
     assert_eq!(scripts["packageManager"], "npm");
     assert_eq!(scripts["packageManagerDetected"], false);
-    assert_eq!(
-        scripts["scripts"][0],
-        json!({ "name": "dev", "command": "vite" })
-    );
+    assert_eq!(scripts["options"][0]["id"], "pkg:dev");
+    assert_eq!(scripts["options"][0]["label"], "npm run dev");
     let editors = call(&h, "list_editors", json!({})).unwrap();
     assert!(editors
         .as_array()
@@ -196,7 +196,8 @@ fn failures_cross_the_boundary_as_structured_error_payloads() {
         &h,
         "set_project_override",
         json!({ "projectId": h.project_id, "overrides": {
-            "displayName": null, "primaryUrl": "file:///etc/passwd", "preferredEditor": null } }),
+            "displayName": null, "primaryUrl": "file:///etc/passwd", "preferredEditor": null,
+            "preferredTerminal": null, "autoRestart": false } }),
     )
     .unwrap_err();
     assert_eq!(invalid["code"], "INVALID_INPUT");
@@ -271,4 +272,75 @@ fn unknown_commands_do_not_exist_there_is_no_generic_exec() {
             "{name}: {err}"
         );
     }
+}
+
+#[test]
+fn launch_profiles_free_ports_terminals_and_activity_cross_the_boundary() {
+    let h = harness();
+    let id = h.project_id;
+    call(
+        &h,
+        "set_launch_profiles",
+        json!({ "projectId": id, "profiles": [
+            { "name": "Dev", "options": ["pkg:dev"], "program": "rm" } ] }),
+    )
+    .unwrap();
+    h.runtime.apply_scan(ScanResult {
+        processes: vec![],
+        sockets: Ok(SocketScan::default()),
+        duration_ms: 1,
+    });
+    let snapshot = call(&h, "get_snapshot", json!({})).unwrap();
+    let profile = &snapshot["projects"][0]["launchProfiles"][0];
+    assert_eq!(profile["name"], "Dev");
+    assert_eq!(profile["commands"][0]["program"], "npm");
+    assert_eq!(profile["commands"][0]["script"], "pkg:dev");
+
+    let bad = call(
+        &h,
+        "set_launch_profiles",
+        json!({ "projectId": id, "profiles": [{ "name": "x", "options": ["bash"] }] }),
+    )
+    .unwrap_err();
+    assert_eq!(bad["code"], "INVALID_INPUT");
+
+    let port = call(&h, "suggest_free_port", json!({ "preferred": 3000 })).unwrap();
+    assert!(port.as_u64().unwrap() >= 3000);
+    let terminals = call(&h, "list_terminals", json!({})).unwrap();
+    assert!(!terminals.as_array().unwrap().is_empty());
+    assert!(terminals[0]["available"].is_boolean());
+    let activity = call(
+        &h,
+        "list_activity",
+        json!({ "projectId": null, "limit": 5 }),
+    )
+    .unwrap();
+    assert!(activity.is_array());
+    call(&h, "clear_activity", json!({})).unwrap();
+
+    // Starting with an unknown profile id is a structured error, never a spawn.
+    let unknown = call(
+        &h,
+        "start_project",
+        json!({ "projectId": id, "profileId": "nope", "port": null }),
+    )
+    .unwrap_err();
+    assert_eq!(unknown["code"], "INVALID_INPUT");
+}
+
+#[test]
+fn invalid_shortcuts_and_terminals_are_rejected_and_nothing_is_saved() {
+    let h = harness();
+    let base = call(&h, "get_settings", json!({})).unwrap();
+    for (field, value) in [
+        ("globalShortcut", json!("K")),
+        ("globalShortcut", json!("Ctrl+Banana")),
+        ("preferredTerminal", json!("hyper")),
+    ] {
+        let mut changed = base.clone();
+        changed[field] = value;
+        let err = call(&h, "update_settings", json!({ "settings": changed })).unwrap_err();
+        assert_eq!(err["code"], "INVALID_INPUT", "{field}");
+    }
+    assert_eq!(call(&h, "get_settings", json!({})).unwrap(), base);
 }

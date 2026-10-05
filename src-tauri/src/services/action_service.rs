@@ -43,7 +43,13 @@ impl Runtime {
 
     pub fn open_project_terminal(&self, id: ProjectId) -> AppResult<()> {
         let project = self.find_project(id)?;
-        platform::open_terminal(&PathBuf::from(project.root_path))
+        // Project choice → global setting → platform default.
+        let terminal = project
+            .overrides
+            .preferred_terminal
+            .clone()
+            .or_else(|| lock(&self.settings).preferred_terminal.clone());
+        platform::open_terminal(&PathBuf::from(project.root_path), terminal.as_deref())
     }
 
     /// Project editor override → global preference → first detected editor.

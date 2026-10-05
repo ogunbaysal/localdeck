@@ -4,6 +4,9 @@ import type { StatusFilter } from "@/lib/search";
 /** Global Ports screen quick filter. `assigned` = owned/shared by a project; `unassigned` = unassigned or ambiguous. */
 export type PortsFilter = "all" | "http" | "assigned" | "unassigned";
 
+/** Activity screen kind filter. */
+export type ActivityGroup = "all" | "lifecycle" | "ports" | "problems";
+
 /** Frontend-only state. Nothing here comes from (or goes back into) the runtime snapshot. */
 export interface UiState {
   searchQuery: string;
@@ -16,6 +19,9 @@ export interface UiState {
   portsSearch: string;
   portsFilter: PortsFilter;
   selectedPortId: string | null;
+  /** Activity screen project filter (`null` = every project) and kind group. */
+  activityProjectId: number | null;
+  activityGroup: ActivityGroup;
 
   setSearchQuery: (query: string) => void;
   setStatusFilter: (filter: StatusFilter) => void;
@@ -26,6 +32,8 @@ export interface UiState {
   setPortsSearch: (query: string) => void;
   setPortsFilter: (filter: PortsFilter) => void;
   selectPort: (portId: string | null) => void;
+  setActivityProjectId: (projectId: number | null) => void;
+  setActivityGroup: (group: ActivityGroup) => void;
 }
 
 export const useUiStore = create<UiState>()((set) => ({
@@ -37,6 +45,8 @@ export const useUiStore = create<UiState>()((set) => ({
   portsSearch: "",
   portsFilter: "all",
   selectedPortId: null,
+  activityProjectId: null,
+  activityGroup: "all",
 
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setStatusFilter: (statusFilter) => set({ statusFilter }),
@@ -53,6 +63,8 @@ export const useUiStore = create<UiState>()((set) => ({
   setPortsSearch: (portsSearch) => set({ portsSearch }),
   setPortsFilter: (portsFilter) => set({ portsFilter }),
   selectPort: (selectedPortId) => set({ selectedPortId }),
+  setActivityProjectId: (activityProjectId) => set({ activityProjectId }),
+  setActivityGroup: (activityGroup) => set({ activityGroup }),
 }));
 
 /** Per-project selector: only re-renders when that project's flag flips. */

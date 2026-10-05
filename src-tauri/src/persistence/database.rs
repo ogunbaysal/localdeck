@@ -38,6 +38,10 @@ const MIGRATIONS: &[&str] = &[
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );",
+    // 2: launch profiles, auto-restart, terminal choice
+    "ALTER TABLE project_overrides ADD COLUMN launch_profiles TEXT;
+    ALTER TABLE project_overrides ADD COLUMN auto_restart INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE project_overrides ADD COLUMN preferred_terminal TEXT;",
 ];
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -207,5 +211,33 @@ mod tests {
             Err(other) => panic!("unexpected error: {other}"),
             Ok(_) => panic!("newer schema must be rejected"),
         }
+    }
+
+    #[test]
+    fn a_v1_database_upgrades_in_place_keeping_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("localdeck.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO projects (root_path, first_seen_at, last_seen_at, favorite) VALUES ('/work/old app', 1, 2, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO project_overrides (project_id, primary_url) VALUES (1, 'http://localhost:3000')",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let record = db.get_project(1).unwrap();
+        assert!(record.favorite);
+        assert_eq!(record.primary_url.as_deref(), Some("http://localhost:3000"));
+        assert!(!record.auto_restart && record.launch_profiles.is_empty());
+        assert!(record.preferred_terminal.is_none());
     }
 }

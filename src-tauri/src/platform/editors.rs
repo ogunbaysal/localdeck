@@ -119,7 +119,7 @@ impl Locator {
     }
 }
 
-fn mac_app_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn mac_app_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from("/Applications")];
     if let Some(home) = home {
         dirs.push(home.join("Applications"));

@@ -84,6 +84,14 @@ impl DetectorConfig {
         }
     }
 
+    /// Paths that must never become a project root, even by explicit choice:
+    /// the filesystem root, the home directory itself, and system locations.
+    pub fn is_forbidden_root(&self, path: &Path) -> bool {
+        path.parent().is_none()
+            || self.home.as_deref() == Some(path)
+            || self.is_system_location(path)
+    }
+
     fn is_system_location(&self, path: &Path) -> bool {
         self.system_locations
             .iter()

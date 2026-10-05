@@ -42,6 +42,7 @@ fn command_sequences(command: &PrimaryCommand, stack: &StackFingerprint) -> Vec<
     let body = command
         .script
         .as_deref()
+        .and_then(|id| id.strip_prefix("pkg:").or(Some(id)))
         .and_then(|name| stack.script(name))
         .map(|s| s.command.as_str());
     if let Some(body) = body {
@@ -187,10 +188,13 @@ pub fn compose_project(facts: &ProjectFacts) -> Project {
         ports,
         primary_url,
         primary_command: record.primary_command.clone(),
+        launch_profiles: record.launch_profiles.clone(),
         overrides: ProjectOverrides {
             display_name: record.display_name.clone(),
             primary_url: record.primary_url.clone(),
             preferred_editor: record.preferred_editor.clone(),
+            preferred_terminal: record.preferred_terminal.clone(),
+            auto_restart: record.auto_restart,
         },
         metrics: if active { metrics } else { Metrics::default() },
         first_seen_at: record.first_seen_at,
@@ -244,6 +248,9 @@ mod tests {
             primary_url: None,
             primary_command: None,
             preferred_editor: None,
+            preferred_terminal: None,
+            auto_restart: false,
+            launch_profiles: vec![],
             component_kinds: BTreeMap::new(),
         }
     }

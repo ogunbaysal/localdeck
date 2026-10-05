@@ -95,7 +95,7 @@ describe("labels and toggles", () => {
     const project = makeProject();
     expect(actionsById(project).get("open-editor")?.label).toBe("Open in Editor");
     expect(actionsById(project, { editors, defaultEditorId: "vscode" }).get("open-editor")?.label).toBe("Open in VS Code");
-    const override = makeProject({ overrides: { displayName: null, primaryUrl: null, preferredEditor: "cursor" } });
+    const override = makeProject({ overrides: { displayName: null, primaryUrl: null, preferredEditor: "cursor", preferredTerminal: null, autoRestart: false } });
     expect(actionsById(override, { editors, defaultEditorId: "vscode" }).get("open-editor")?.label).toBe("Open in Cursor");
   });
 
@@ -138,5 +138,72 @@ describe("run()", () => {
     expect(success).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalledTimes(1);
     warning.mockRestore();
+  });
+});
+
+describe("launch profile actions", () => {
+  const profiles = [
+    { id: "p1", name: "Web + API", commands: [makeCommand()] },
+    { id: "p2", name: "Empty", commands: [] },
+  ];
+
+  test("a stopped project offers start-profile actions, an empty profile disabled", () => {
+    const actions = actionsById(makeProject({ id: 7, primaryCommand: makeCommand(), launchProfiles: profiles }));
+    expect(actions.get("start-profile:p1")).toMatchObject({ profileId: "p1", group: "lifecycle" });
+    expect(actions.get("start-profile:p1")?.disabled).toBeFalsy();
+    expect(actions.get("start-profile:p2")).toMatchObject({ disabled: true, disabledReason: "This profile has no commands" });
+    expect(actions.has("restart-profile:p1")).toBe(false);
+  });
+
+  test("a running project offers restart-profile actions instead", () => {
+    const actions = actionsById(makeRunningProject({ launchProfiles: profiles }));
+    expect(actions.has("restart-profile:p1")).toBe(true);
+    expect(actions.has("start-profile:p1")).toBe(false);
+  });
+
+  test("run() starts / restarts with the profile id", async () => {
+    backend.reply("start_project", undefined);
+    backend.reply("restart_project", undefined);
+    await actionsById(makeProject({ id: 7, launchProfiles: profiles })).get("start-profile:p1")?.run();
+    await actionsById(makeRunningProject({ id: 8, launchProfiles: profiles })).get("restart-profile:p1")?.run();
+    expect(backend.callsTo("start_project")).toEqual([{ projectId: 7, profileId: "p1", port: null }]);
+    expect(backend.callsTo("restart_project")).toEqual([{ projectId: 8, profileId: "p1", port: null }]);
+  });
+
+  test("projects without profiles gain no profile actions", () => {
+    const ids = getProjectActions(makeProject()).map((action) => action.id);
+    expect(ids.some((id) => id.includes("profile"))).toBe(false);
+  });
+});
+
+describe("copy actions", () => {
+  test("copy path / cd / start command put quoted text on the clipboard", async () => {
+    const project = makeProject({
+      rootPath: "/home/dev/my app",
+      primaryCommand: makeCommand({ program: "bun", args: ["run", "dev server"] }),
+    });
+    const actions = actionsById(project);
+    const written: string[] = [];
+    const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void written.push(text) },
+    });
+    try {
+      await actions.get("copy-path")?.run();
+      await actions.get("copy-cd")?.run();
+      await actions.get("copy-start")?.run();
+    } finally {
+      if (original) Object.defineProperty(navigator, "clipboard", original);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+    expect(written).toEqual(["/home/dev/my app", "cd '/home/dev/my app'", "bun run 'dev server'"]);
+  });
+
+  test("copy-start needs a primary command", () => {
+    expect(actionsById(makeProject()).get("copy-start")).toMatchObject({
+      disabled: true,
+      disabledReason: "No start command configured",
+    });
   });
 });

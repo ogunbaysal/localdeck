@@ -1,7 +1,7 @@
 //! Background scanner: one dedicated thread, one scan at a time (overlap is
 //! impossible by construction), ~2 s cadence, early wake-up after actions.
 
-use super::runtime::{Runtime, ScanResult, SCAN_INTERVAL_MS};
+use super::runtime::{Runtime, ScanResult};
 use crate::engine::providers::{NetstatSocketProvider, SysinfoProcessProvider};
 use crate::engine::raw::{ProcessProvider, SocketProvider};
 use crate::error::{AppError, AppResult};
@@ -29,6 +29,7 @@ impl Scanner {
 
     /// One full scan applied to `runtime`.
     pub fn scan_once(&mut self, runtime: &Runtime) -> Arc<AppSnapshot> {
+        runtime.run_due_restarts(Instant::now());
         let started = Instant::now();
         let processes = self.processes.snapshot().unwrap_or_else(|err| {
             tracing::warn!(%err, "process listing failed");
@@ -65,10 +66,13 @@ where
     std::thread::Builder::new()
         .name("localdeck-scanner".to_string())
         .spawn(move || {
-            let interval = Duration::from_millis(u64::from(SCAN_INTERVAL_MS));
             let mut last = Instant::now();
             loop {
-                let wait = interval.saturating_sub(last.elapsed());
+                // The cadence follows what is visible (window / tray / neither).
+                let wait =
+                    runtime
+                        .pacing
+                        .wait(Instant::now(), last.elapsed(), runtime.next_restart_due());
                 match wake.recv_timeout(wait) {
                     Ok(()) => {
                         while wake.try_recv().is_ok() {}

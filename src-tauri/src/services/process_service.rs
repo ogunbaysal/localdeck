@@ -5,17 +5,14 @@
 //! live process is re-checked (existence + start time) right before signalling
 //! so a recycled PID is never hit.
 
-use super::runtime::{lock, ManagedEntry, Runtime};
+use super::runtime::{lock, Runtime};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AttentionItem, AttentionKind, ProcessFailure, ProjectId, RuntimeStatus, StopReport,
 };
 use crate::platform::{self, Signal};
-use std::time::{Duration, Instant};
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
-const RESTART_WAIT: Duration = Duration::from_secs(8);
-const RESTART_POLL: Duration = Duration::from_millis(100);
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// Start time (epoch ms) of the live process `pid`, if it exists.
 pub fn live_start_time(pid: u32) -> Option<i64> {
@@ -135,9 +132,10 @@ impl Runtime {
         }
         {
             let mut st = lock(&self.state);
-            if let Some(entry) = st.managed.get_mut(&id) {
+            for entry in st.managed.get_mut(&id).into_iter().flatten() {
                 entry.stop_requested = true;
             }
+            st.cancel_restarts(id);
             if !requested.is_empty() {
                 st.stop_requests.insert(id, requested);
             }
@@ -152,117 +150,6 @@ impl Runtime {
             return Err(first);
         }
         Ok(report)
-    }
-
-    fn spawn_for(&self, id: ProjectId) -> AppResult<()> {
-        let command = {
-            let st = lock(&self.state);
-            st.registry
-                .get(&id)
-                .ok_or(AppError::ProjectNotFound { id })?
-                .record
-                .primary_command
-                .clone()
-        }
-        .ok_or(AppError::NoPrimaryCommand)?;
-
-        // Blocking: may resolve the user's login-shell PATH on first use.
-        let child = match platform::spawn_managed(&command) {
-            Ok(child) => child,
-            Err(err) => {
-                self.note_action_failure(id, &err);
-                return Err(err);
-            }
-        };
-        let pid = child.id();
-        {
-            let mut st = lock(&self.state);
-            if let Some(mut previous) = st.managed.remove(&id) {
-                let _ = previous.child.try_wait();
-            }
-            st.stop_requests.remove(&id);
-            if let Some(items) = st.transient.get_mut(&id) {
-                items.retain(|t| {
-                    !matches!(
-                        t.item.kind,
-                        AttentionKind::ManagedExited | AttentionKind::ActionFailed
-                    )
-                });
-            }
-            st.managed.insert(
-                id,
-                ManagedEntry {
-                    child,
-                    pid,
-                    label: command.label.clone(),
-                    stop_requested: false,
-                },
-            );
-        }
-        self.request_scan();
-        Ok(())
-    }
-
-    /// Spawn the project's primary command (`program + args + cwd`, no shell).
-    pub fn start_project(&self, id: ProjectId) -> AppResult<()> {
-        let project = self.find_project(id)?;
-        if project.primary_command.is_none() {
-            return Err(AppError::NoPrimaryCommand);
-        }
-        if project.runtime_status != RuntimeStatus::Stopped {
-            return Err(AppError::ProjectAlreadyRunning);
-        }
-        let still_managed = lock(&self.state)
-            .managed
-            .get_mut(&id)
-            .is_some_and(|m| m.child.try_wait().ok().flatten().is_none());
-        if still_managed {
-            return Err(AppError::ProjectAlreadyRunning);
-        }
-        self.spawn_for(id)
-    }
-
-    /// Graceful stop, wait for the signalled roots, then a managed start.
-    /// Never escalates to force kill: stragglers surface as an explicit error.
-    pub fn restart_project(&self, id: ProjectId) -> AppResult<()> {
-        let project = self.find_project(id)?;
-        if project.primary_command.is_none() {
-            return Err(AppError::NoPrimaryCommand);
-        }
-        if project.runtime_status != RuntimeStatus::Stopped {
-            let report = self.stop_project(id, false)?;
-            let pending: Vec<(u32, Option<i64>)> = report
-                .signaled
-                .iter()
-                .map(|pid| {
-                    let started = project
-                        .processes
-                        .iter()
-                        .find(|p| p.pid == *pid)
-                        .and_then(|p| p.started_at);
-                    (*pid, started)
-                })
-                .collect();
-            let deadline = Instant::now() + RESTART_WAIT;
-            loop {
-                let remaining = pending
-                    .iter()
-                    .filter(|(pid, started)| still_alive(*pid, *started))
-                    .count();
-                if remaining == 0 {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    let err = AppError::ProcessesStillRunning {
-                        remaining: remaining as u32,
-                    };
-                    self.note_action_failure(id, &err);
-                    return Err(err);
-                }
-                std::thread::sleep(RESTART_POLL);
-            }
-        }
-        self.spawn_for(id)
     }
 }
 
@@ -279,6 +166,7 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
     use std::process::{Child, Command};
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     struct NoProbe;
@@ -339,9 +227,11 @@ mod tests {
 
     fn kill_leftovers(runtime: &Runtime) {
         let mut st = lock(&runtime.state);
-        for (_, mut entry) in st.managed.drain() {
-            let _ = entry.child.kill();
-            let _ = entry.child.wait();
+        for (_, entries) in st.managed.drain() {
+            for mut entry in entries {
+                let _ = entry.child.kill();
+                let _ = entry.child.wait();
+            }
         }
     }
 
@@ -354,11 +244,11 @@ mod tests {
 
         // No primary command → explicit structured error.
         assert_eq!(
-            runtime.start_project(id).unwrap_err().code(),
+            runtime.start_project(id, None, None).unwrap_err().code(),
             crate::error::ErrorCode::NoPrimaryCommand
         );
         assert_eq!(
-            runtime.restart_project(id).unwrap_err().code(),
+            runtime.restart_project(id, None, None).unwrap_err().code(),
             crate::error::ErrorCode::NoPrimaryCommand
         );
 
@@ -374,7 +264,9 @@ mod tests {
             .primary_command = Some(sleep_command(&root));
         real_scan(&runtime, &mut procs);
 
-        runtime.start_project(id).expect("managed start");
+        runtime
+            .start_project(id, None, None)
+            .expect("managed start");
         assert!(
             wait_until(|| {
                 real_scan(&runtime, &mut procs);
@@ -393,13 +285,13 @@ mod tests {
             .iter()
             .all(|p| p.origin == crate::models::ProcessOrigin::LocalDeckManaged));
         assert_eq!(
-            runtime.start_project(id).unwrap_err().code(),
+            runtime.start_project(id, None, None).unwrap_err().code(),
             crate::error::ErrorCode::ProjectAlreadyRunning
         );
 
         // Restart: graceful stop → new managed process with a different pid.
         let old_pid = project.components[0].root_pid;
-        runtime.restart_project(id).expect("restart");
+        runtime.restart_project(id, None, None).expect("restart");
         assert!(
             wait_until(|| {
                 real_scan(&runtime, &mut procs);
@@ -453,7 +345,7 @@ mod tests {
             .primary_command = Some(command);
         let mut procs = SysinfoProcessProvider::new();
         real_scan(&runtime, &mut procs);
-        runtime.start_project(id).unwrap();
+        runtime.start_project(id, None, None).unwrap();
         assert!(wait_until(|| {
             real_scan(&runtime, &mut procs);
             runtime
@@ -500,7 +392,7 @@ mod tests {
             .primary_command = Some(command);
         let mut procs = SysinfoProcessProvider::new();
         real_scan(&runtime, &mut procs);
-        let err = runtime.start_project(id).unwrap_err();
+        let err = runtime.start_project(id, None, None).unwrap_err();
         assert_eq!(err.code(), crate::error::ErrorCode::CommandSpawnFailed);
         real_scan(&runtime, &mut procs);
         let project = runtime.find_project(id).unwrap();

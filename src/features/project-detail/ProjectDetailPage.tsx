@@ -14,6 +14,7 @@ import type { Project } from "@/types";
 import { ActivitySection } from "./activity-section";
 import { AttentionList } from "./attention-list";
 import { ComponentsSection } from "./components-section";
+import { LaunchProfilesSection } from "./launch-profiles-section";
 import { OverviewSection } from "./overview-section";
 import { PortsSection } from "./ports-section";
 import { ProcessesSection } from "./processes-section";
@@ -74,6 +75,7 @@ function ProjectDetail({ project }: { project: Project }) {
       />
       <AttentionList projectId={project.id} items={project.attention} />
       <OverviewSection project={project} ports={ports} actions={actions} onChooseCommand={openSettings} />
+      <LaunchProfilesSection project={project} />
       <ComponentsSection projectId={project.id} components={project.components} processes={project.processes} />
       <PortsSection ports={ports} components={project.components} />
       <ActivitySection events={project.recentActivity} />

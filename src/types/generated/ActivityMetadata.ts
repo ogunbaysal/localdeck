@@ -7,4 +7,8 @@ export type ActivityMetadata = { port?: number, component?: string, exitCode?: n
 /**
  * The project was already running when LocalDeck first looked.
  */
-detected: boolean, };
+detected: boolean, 
+/**
+ * Auto-restart attempt number.
+ */
+attempt?: number, };

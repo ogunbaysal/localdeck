@@ -1,5 +1,7 @@
 import {
   ExternalLink,
+  FolderPlus,
+  History,
   LayoutGrid,
   Network,
   Settings as SettingsIcon,
@@ -10,10 +12,13 @@ import { runAction } from "@/lib/actions";
 import { formatPortList } from "@/lib/format";
 import { getProjectActions, type ProjectActionConfirmation, type ProjectActionId } from "@/lib/project-actions";
 import { matchProject } from "@/lib/search";
-import { openPortUrl } from "@/lib/tauri";
+import { openPortUrl, pickAndAddProject } from "@/lib/tauri";
 import type { EditorInfo, PortInfo, Project, RuntimeStatus } from "@/types";
 
 export type PaletteGroup = "navigate" | "projects" | "actions" | "ports";
+
+/** Prefix of the launch-profile actions `getProjectActions` emits; the palette lists them itself. */
+const START_PROFILE_PREFIX = "start-profile:";
 
 export const PALETTE_GROUP_HEADINGS: Record<PaletteGroup, string> = {
   navigate: "Navigate",
@@ -63,6 +68,7 @@ export interface PaletteInput {
 const NAVIGATION: ReadonlyArray<{ to: string; label: string; icon: LucideIcon }> = [
   { to: "/", label: "Go to Projects", icon: LayoutGrid },
   { to: "/ports", label: "Go to Ports", icon: Network },
+  { to: "/activity", label: "Open Activity", icon: History },
   { to: "/settings", label: "Go to Settings", icon: SettingsIcon },
 ];
 
@@ -98,6 +104,18 @@ export function buildPaletteItems(input: PaletteInput, context: PaletteContext):
     items.push({ id: `nav:${to}`, group: "navigate", label, icon, run: () => context.navigate(to) });
   }
 
+  items.push({
+    id: "add-project",
+    group: "navigate",
+    label: "Add project…",
+    icon: FolderPlus,
+    run: async () => {
+      const projectId = await runAction("Add project", pickAndAddProject, { success: false });
+      // `null` = the folder dialog was cancelled.
+      if (projectId !== undefined && projectId !== null) context.navigate(`/projects/${projectId}`);
+    },
+  });
+
   for (const project of ordered) {
     items.push({
       id: `project:${project.id}`,
@@ -112,6 +130,21 @@ export function buildPaletteItems(input: PaletteInput, context: PaletteContext):
 
   for (const project of ordered) {
     for (const action of getProjectActions(project, { editors, defaultEditorId })) {
+      if (action.id.startsWith(START_PROFILE_PREFIX)) {
+        // One entry per launch profile: “Start “Dev stack”” with the project as its meta text.
+        if (!action.disabled) {
+          items.push({
+            id: `action:${project.id}:${action.id}`,
+            group: "actions",
+            label: action.label,
+            meta: project.name,
+            icon: action.icon,
+            project,
+            run: action.run,
+          });
+        }
+        continue;
+      }
       const label = ACTION_LABELS[action.id];
       if (!label || action.disabled) continue;
       const url = project.primaryUrl?.url;

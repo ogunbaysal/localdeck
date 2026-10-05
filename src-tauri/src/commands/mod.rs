@@ -3,14 +3,18 @@
 //! resolves paths/commands from Rust-owned state, never from frontend input.
 
 mod actions;
+mod activity;
 mod processes;
 mod projects;
 mod settings;
+mod transfer;
 
 pub use actions::*;
+pub use activity::*;
 pub use processes::*;
 pub use projects::*;
 pub use settings::*;
+pub use transfer::*;
 
 use crate::error::{AppError, AppResult};
 use crate::services::runtime::Runtime;

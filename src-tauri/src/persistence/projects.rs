@@ -2,7 +2,7 @@
 
 use super::database::Database;
 use crate::error::{AppError, AppResult};
-use crate::models::{ComponentKind, PrimaryCommand, ProjectId};
+use crate::models::{ComponentKind, LaunchProfile, PrimaryCommand, ProjectId};
 use rusqlite::{params, OptionalExtension, Row, Transaction};
 use std::collections::BTreeMap;
 
@@ -20,12 +20,16 @@ pub struct ProjectRecord {
     pub primary_url: Option<String>,
     pub primary_command: Option<PrimaryCommand>,
     pub preferred_editor: Option<String>,
+    pub preferred_terminal: Option<String>,
+    pub auto_restart: bool,
+    pub launch_profiles: Vec<LaunchProfile>,
     pub component_kinds: BTreeMap<String, ComponentKind>,
 }
 
 const SELECT_PROJECT: &str = "SELECT p.id, p.root_path, p.display_name_override, p.first_seen_at,
         p.last_seen_at, p.favorite, p.ignored,
-        o.primary_url, o.primary_command, o.preferred_editor, o.component_overrides
+        o.primary_url, o.primary_command, o.preferred_editor, o.component_overrides,
+        o.preferred_terminal, o.auto_restart, o.launch_profiles
     FROM projects p LEFT JOIN project_overrides o ON o.project_id = p.id";
 
 /// Parse a JSON column. A corrupt value degrades to `None` instead of making
@@ -59,6 +63,9 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<ProjectRecord> {
         primary_command: parse_json(id, "primary_command", row.get(8)?),
         preferred_editor: row.get(9)?,
         component_kinds: parse_json(id, "component_overrides", row.get(10)?).unwrap_or_default(),
+        preferred_terminal: row.get(11)?,
+        auto_restart: row.get::<_, Option<bool>>(12)?.unwrap_or(false),
+        launch_profiles: parse_json(id, "launch_profiles", row.get(13)?).unwrap_or_default(),
     })
 }
 
@@ -153,6 +160,34 @@ impl Database {
 
     pub fn set_preferred_editor(&mut self, id: ProjectId, editor: Option<&str>) -> AppResult<()> {
         self.update_override_column("preferred_editor", id, normalise(editor))
+    }
+
+    pub fn set_preferred_terminal(
+        &mut self,
+        id: ProjectId,
+        terminal: Option<&str>,
+    ) -> AppResult<()> {
+        self.update_override_column("preferred_terminal", id, normalise(terminal))
+    }
+
+    pub fn set_auto_restart(&mut self, id: ProjectId, enabled: bool) -> AppResult<()> {
+        self.update_override_column("auto_restart", id, enabled)
+    }
+
+    /// Replace all launch profiles (empty clears them).
+    pub fn set_launch_profiles(
+        &mut self,
+        id: ProjectId,
+        profiles: &[LaunchProfile],
+    ) -> AppResult<()> {
+        let json = if profiles.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(profiles).map_err(|err| {
+                AppError::Database(format!("could not encode launch profiles: {err}"))
+            })?)
+        };
+        self.update_override_column("launch_profiles", id, json)
     }
 
     /// Set, replace (`Some`) or remove (`None`) one component-kind override.
@@ -550,5 +585,46 @@ mod tests {
         assert_eq!(loaded.primary_command, None);
         assert!(loaded.component_kinds.is_empty());
         assert_eq!(db.list_projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn terminal_auto_restart_and_launch_profiles_round_trip() {
+        use crate::models::{LaunchProfile, PrimaryCommand};
+        let mut db = Database::open_in_memory().unwrap();
+        let id = db.upsert_project("/tmp/ünï code/app", 1).unwrap().id;
+        let record = db.get_project(id).unwrap();
+        assert!(!record.auto_restart && record.launch_profiles.is_empty());
+        let profile = LaunchProfile {
+            id: "p1".into(),
+            name: "Web + API".into(),
+            commands: vec![PrimaryCommand {
+                program: "bun".into(),
+                args: vec!["run".into(), "dev server".into()],
+                cwd: "/tmp/ünï code/app".into(),
+                label: "bun run dev server".into(),
+                script: Some("pkg:dev server".into()),
+            }],
+        };
+        db.set_preferred_terminal(id, Some(" ghostty ")).unwrap();
+        db.set_auto_restart(id, true).unwrap();
+        db.set_launch_profiles(id, std::slice::from_ref(&profile))
+            .unwrap();
+        let record = db.get_project(id).unwrap();
+        assert_eq!(record.preferred_terminal.as_deref(), Some("ghostty"));
+        assert!(record.auto_restart);
+        assert_eq!(record.launch_profiles, vec![profile]);
+        db.set_launch_profiles(id, &[]).unwrap();
+        db.set_preferred_terminal(id, None).unwrap();
+        db.set_auto_restart(id, false).unwrap();
+        let record = db.get_project(id).unwrap();
+        assert!(
+            record.launch_profiles.is_empty()
+                && record.preferred_terminal.is_none()
+                && !record.auto_restart
+        );
+        assert_eq!(
+            db.set_auto_restart(999, true).unwrap_err().code(),
+            crate::error::ErrorCode::ProjectNotFound
+        );
     }
 }

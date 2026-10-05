@@ -1,11 +1,19 @@
-import { Copy, ExternalLink, FolderSearch, OctagonX, ShieldAlert, Square } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { ChevronDown, Copy, ExternalLink, FolderSearch, OctagonX, ShieldAlert, Square, Terminal } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { ConfirmDialog, CopyButton, Mono } from "@/components/shared";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { copyToClipboard, runAction } from "@/lib/actions";
+import { describeError } from "@/lib/errors";
 import { formatUptime } from "@/lib/format";
-import { forceKillProcess, openPortUrl, terminateProcess } from "@/lib/tauri";
+import { killCommand, lsofPortCommand } from "@/lib/shell-quote";
+import { forceKillProcess, openPortUrl, suggestFreePort, terminateProcess } from "@/lib/tauri";
 import type { PortProcess } from "@/types";
 import { formatEndpoint, type PortRow } from "./port-model";
 
@@ -17,6 +25,36 @@ const OWNERSHIP_NOTE = {
   shared: "One project owns this port, but more than one of its components holds it.",
   assigned: null,
 } as const;
+
+type FreePortState =
+  | { status: "loading" }
+  | { status: "ready"; port: number }
+  | { status: "error"; message: string };
+
+/** Asks the backend for the next free port after `port`, once, when the panel opens. */
+function useNextFreePort(port: number): FreePortState {
+  const [state, setState] = useState<FreePortState>({ status: "loading" });
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "loading" });
+    suggestFreePort(port + 1).then(
+      (free) => {
+        if (!cancelled) setState({ status: "ready", port: free });
+      },
+      (error: unknown) => {
+        if (!cancelled) setState({ status: "error", message: describeError(error).message });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [port]);
+  return state;
+}
+
+function copyAction(label: string, text: string, success: string) {
+  void runAction(label, () => copyToClipboard(text), { success });
+}
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -45,6 +83,32 @@ function ProcessLine({
         )}
       </span>
       <span className="flex items-center gap-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="xs" aria-label={`Copy commands for ${name} (pid ${process.pid})`}>
+              <Copy /> Copy <ChevronDown />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={() => copyAction("Copy kill command", killCommand(process.pid), "Copied kill command")}
+            >
+              <Terminal /> Copy kill command (SIGTERM)
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              onSelect={() =>
+                copyAction(
+                  "Copy force-kill command",
+                  killCommand(process.pid, true),
+                  "Copied force-kill command (SIGKILL)",
+                )
+              }
+            >
+              <Terminal /> Copy force-kill command (SIGKILL)
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button
           variant="outline"
           size="xs"
@@ -77,6 +141,7 @@ export function PortDetail({ row, onReveal }: { row: PortRow; onReveal: (project
   const { port, project, component } = row;
   const [killTarget, setKillTarget] = useState<PortProcess | null>(null);
   const note = OWNERSHIP_NOTE[port.ownership];
+  const freePort = useNextFreePort(port.port);
 
   return (
     <div
@@ -128,6 +193,19 @@ export function PortDetail({ row, onReveal }: { row: PortRow; onReveal: (project
 
       {note && <p className="text-xs text-muted-foreground">{note}</p>}
 
+      <p className="flex items-center gap-1 text-muted-foreground" aria-live="polite">
+        {freePort.status === "loading" && "Looking for a free port…"}
+        {freePort.status === "error" && `Couldn't find a free port: ${freePort.message}`}
+        {freePort.status === "ready" && (
+          <>
+            <span>
+              Next free port: <Mono className="text-foreground">{freePort.port}</Mono>
+            </span>
+            <CopyButton value={String(freePort.port)} label="Copy free port" />
+          </>
+        )}
+      </p>
+
       <div>
         <h3 className="mb-0.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
           {port.processes.length > 1 ? `Processes (${port.processes.length})` : "Process"}
@@ -148,41 +226,51 @@ export function PortDetail({ row, onReveal }: { row: PortRow; onReveal: (project
         )}
       </div>
 
-      {(port.url || project) && (
-        <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-          {port.url && (
-            <>
-              <Button
-                size="sm"
-                onClick={() =>
-                  void runAction("Open URL", () => openPortUrl(port.id), {
-                    success: `Opened ${port.url}`,
-                  })
-                }
-              >
-                <ExternalLink /> Open URL
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  const url = port.url;
-                  if (url) {
-                    void runAction("Copy URL", () => copyToClipboard(url), { success: "URL copied" });
-                  }
-                }}
-              >
-                <Copy /> Copy URL
-              </Button>
-            </>
-          )}
-          {project && (
-            <Button variant="outline" size="sm" onClick={() => onReveal(project.id)}>
-              <FolderSearch /> Reveal project
+      <div className="flex flex-wrap items-center gap-2 border-t pt-3">
+        {port.url && (
+          <>
+            <Button
+              size="sm"
+              onClick={() =>
+                void runAction("Open URL", () => openPortUrl(port.id), {
+                  success: `Opened ${port.url}`,
+                })
+              }
+            >
+              <ExternalLink /> Open URL
             </Button>
-          )}
-        </div>
-      )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const url = port.url;
+                if (url) copyAction("Copy URL", url, "URL copied");
+              }}
+            >
+              <Copy /> Copy URL
+            </Button>
+          </>
+        )}
+        {project && (
+          <Button variant="outline" size="sm" onClick={() => onReveal(project.id)}>
+            <FolderSearch /> Reveal project
+          </Button>
+        )}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => copyAction("Copy port", String(port.port), `Copied ${port.port}`)}
+        >
+          <Copy /> Copy port
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => copyAction("Copy lsof command", lsofPortCommand(port.port), "Copied lsof command")}
+        >
+          <Terminal /> Copy lsof command
+        </Button>
+      </div>
 
       <ConfirmDialog
         open={killTarget !== null}

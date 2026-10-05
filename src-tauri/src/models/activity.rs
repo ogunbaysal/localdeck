@@ -12,6 +12,8 @@ pub enum ActivityKind {
     PortConflict,
     ManagedExited,
     RuntimeLost,
+    AutoRestarted,
+    AutoRestartGaveUp,
 }
 
 impl ActivityKind {
@@ -24,6 +26,8 @@ impl ActivityKind {
             Self::PortConflict => "port_conflict",
             Self::ManagedExited => "managed_exited",
             Self::RuntimeLost => "runtime_lost",
+            Self::AutoRestarted => "auto_restarted",
+            Self::AutoRestartGaveUp => "auto_restart_gave_up",
         }
     }
 
@@ -36,6 +40,8 @@ impl ActivityKind {
             "port_conflict" => Self::PortConflict,
             "managed_exited" => Self::ManagedExited,
             "runtime_lost" => Self::RuntimeLost,
+            "auto_restarted" => Self::AutoRestarted,
+            "auto_restart_gave_up" => Self::AutoRestartGaveUp,
             _ => return None,
         })
     }
@@ -58,6 +64,10 @@ pub struct ActivityMetadata {
     /// The project was already running when LocalDeck first looked.
     #[serde(default)]
     pub detected: bool,
+    /// Auto-restart attempt number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +110,13 @@ impl ActivityEvent {
                 (_, Some(code)) => format!("Managed command exited with code {code}"),
                 _ => "Managed command exited".to_string(),
             },
+            ActivityKind::AutoRestarted => match meta.attempt {
+                Some(n) => format!("Restarted automatically (attempt {n})"),
+                None => "Restarted automatically".to_string(),
+            },
+            ActivityKind::AutoRestartGaveUp => {
+                "Auto-restart gave up after repeated crashes".to_string()
+            }
             ActivityKind::RuntimeLost => match component {
                 Some(name) => format!("{name} disappeared while the project kept running"),
                 None => "A component disappeared while the project kept running".to_string(),

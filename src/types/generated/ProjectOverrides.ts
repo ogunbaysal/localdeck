@@ -3,4 +3,8 @@
 /**
  * User-editable overrides surfaced to the project settings dialog.
  */
-export type ProjectOverrides = { displayName: string | null, primaryUrl: string | null, preferredEditor: string | null, };
+export type ProjectOverrides = { displayName: string | null, primaryUrl: string | null, preferredEditor: string | null, preferredTerminal: string | null, 
+/**
+ * Restart managed commands that exit unexpectedly (bounded backoff).
+ */
+autoRestart: boolean, };

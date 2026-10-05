@@ -118,7 +118,7 @@ describe("primary actions", () => {
     backend.reply("start_project", null);
     const { user } = renderPage([running(), stopped({ primaryCommand: makeCommand() })]);
     await user.click(screen.getByRole("button", { name: "Start Bravo" }));
-    expect(backend.callsTo("start_project")).toEqual([{ projectId: 2 }]);
+    expect(backend.callsTo("start_project")).toEqual([{ projectId: 2, profileId: null, port: null }]);
   });
 
   test("the star toggles the favourite through the backend", async () => {
@@ -325,7 +325,7 @@ describe("empty states", () => {
     expect(within(list).queryByRole("button", { name: "Start Charlie" })).not.toBeInTheDocument();
 
     await user.click(within(list).getByRole("button", { name: "Start Bravo" }));
-    expect(backend.callsTo("start_project")).toEqual([{ projectId: 2 }]);
+    expect(backend.callsTo("start_project")).toEqual([{ projectId: 2, profileId: null, port: null }]);
   });
 
   test("ignored projects are not remembered rows but are mentioned", () => {

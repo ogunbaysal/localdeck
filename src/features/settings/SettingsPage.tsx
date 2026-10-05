@@ -8,13 +8,18 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { runAction } from "@/lib/actions";
-import { describeError } from "@/lib/errors";
+import { formatAccelerator } from "@/lib/shortcut";
+import { usePlatform } from "@/hooks/use-platform";
+import { describeError, toErrorPayload } from "@/lib/errors";
 import { forgetStoppedProjects, listEditors, updateSettings } from "@/lib/tauri";
 import { selectProjects, selectSettings, useRuntimeStore } from "@/stores/runtime-store";
-import type { EditorInfo, Settings, Theme } from "@/types";
+import type { EditorInfo, ErrorPayload, Settings, Theme } from "@/types";
+import { BackupSection } from "./BackupSection";
 import { IgnoredProjectsSection } from "./IgnoredProjectsSection";
 import { SettingRow, SettingsSection } from "./settings-layout";
+import { ShortcutField } from "./ShortcutField";
 import { SystemAccessSection } from "./SystemAccessSection";
+import { TerminalRow } from "./TerminalRow";
 
 const THEMES: ReadonlyArray<{ value: Theme; label: string; icon: LucideIcon }> = [
   { value: "system", label: "System", icon: Monitor },
@@ -122,24 +127,50 @@ export function SettingsPage() {
         (project) => project.runtimeStatus === "stopped" && !project.ignored && !project.favorite,
       ).length,
   );
+  const platform = usePlatform();
   const [saving, setSaving] = useState(false);
   const [confirmForget, setConfirmForget] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
 
   /**
    * Full-object replace. The controls are driven by the store, so on failure they simply
    * stay on the last value the backend accepted (and the toast says why).
    */
   const save = useCallback(
-    async (patch: Partial<Settings>, label: string, success: string) => {
+    async (patch: Partial<Settings>, label: string, success: string): Promise<ErrorPayload | null> => {
       const current = useRuntimeStore.getState().settings;
-      if (!current) return;
+      if (!current) return null;
       setSaving(true);
-      const saved = await runAction(label, () => updateSettings({ ...current, ...patch }), { success });
+      let failure: ErrorPayload | null = null;
+      const saved = await runAction(
+        label,
+        async () => {
+          try {
+            return await updateSettings({ ...current, ...patch });
+          } catch (error) {
+            failure = toErrorPayload(error);
+            throw error;
+          }
+        },
+        { success },
+      );
       setSaving(false);
       if (saved) setSettings(saved);
+      return failure;
     },
     [setSettings],
   );
+
+  const saveShortcut = async (accelerator: string | null) => {
+    setShortcutError(null);
+    const failure = await save(
+      { globalShortcut: accelerator },
+      "Change global shortcut",
+      accelerator === null ? "Global shortcut cleared" : `Global shortcut: ${formatAccelerator(accelerator, platform)}`,
+    );
+    // Rejected shortcuts (already taken, not registrable) are explained next to the control.
+    if (failure?.code === "INVALID_INPUT") setShortcutError(failure.message);
+  };
 
   if (!settings) {
     return (
@@ -232,9 +263,56 @@ export function SettingsPage() {
             />
           }
         />
+        <SettingRow
+          label="Global shortcut"
+          htmlFor="setting-global-shortcut"
+          description={
+            shortcutError ? (
+              <span id="setting-global-shortcut-error" role="alert" className="text-destructive">
+                {shortcutError}
+              </span>
+            ) : (
+              "Brings LocalDeck to the front and opens the command palette from anywhere. Needs at least one modifier key; Esc cancels recording."
+            )
+          }
+          control={
+            <ShortcutField
+              id="setting-global-shortcut"
+              value={settings.globalShortcut}
+              platform={platform}
+              disabled={saving}
+              invalid={shortcutError !== null}
+              describedBy={shortcutError ? "setting-global-shortcut-error" : undefined}
+              onCapture={(accelerator) => void saveShortcut(accelerator)}
+              onClear={() => void saveShortcut(null)}
+            />
+          }
+        />
       </SettingsSection>
 
-      <SettingsSection title="Editor">
+      <SettingsSection title="Notifications">
+        <SettingRow
+          label="Desktop notifications"
+          htmlFor="setting-notifications"
+          description="Tell me when a managed command crashes, a port conflict appears, a component disappears or auto-restart gives up."
+          control={
+            <Switch
+              id="setting-notifications"
+              checked={settings.notificationsEnabled}
+              disabled={saving}
+              onCheckedChange={(checked) =>
+                void save(
+                  { notificationsEnabled: checked },
+                  "Change notifications",
+                  checked ? "Notifications on" : "Notifications off",
+                )
+              }
+            />
+          }
+        />
+      </SettingsSection>
+
+      <SettingsSection title="Editor and terminal">
         <EditorRow
           settings={settings}
           saving={saving}
@@ -243,6 +321,17 @@ export function SettingsPage() {
               { preferredEditor: editorId },
               "Change preferred editor",
               editorId === null ? "Editor: auto-detect" : "Preferred editor saved",
+            )
+          }
+        />
+        <TerminalRow
+          settings={settings}
+          saving={saving}
+          onChange={(terminalId) =>
+            void save(
+              { preferredTerminal: terminalId },
+              "Change preferred terminal",
+              terminalId === null ? "Terminal: system default" : "Preferred terminal saved",
             )
           }
         />
@@ -305,6 +394,7 @@ export function SettingsPage() {
       </SettingsSection>
 
       <IgnoredProjectsSection />
+      <BackupSection />
       <SystemAccessSection />
 
       <SettingsSection title="About">

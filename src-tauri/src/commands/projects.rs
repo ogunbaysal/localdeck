@@ -1,6 +1,8 @@
 use super::blocking;
 use crate::error::AppResult;
-use crate::models::{AppSnapshot, ComponentKind, ProjectId, ProjectOverrides, ProjectScripts};
+use crate::models::{
+    AppSnapshot, ComponentKind, LaunchProfileInput, ProjectId, ProjectOverrides, ProjectScripts,
+};
 use crate::services::runtime::Runtime;
 use std::sync::Arc;
 use tauri::State;
@@ -82,10 +84,10 @@ pub async fn list_project_scripts(
 pub async fn set_primary_command(
     runtime: Rt<'_>,
     project_id: ProjectId,
-    script: Option<String>,
+    option: Option<String>,
 ) -> AppResult<()> {
     blocking(&runtime, move |rt| {
-        rt.set_primary_command(project_id, script)
+        rt.set_primary_command(project_id, option)
     })
     .await
 }
@@ -98,6 +100,18 @@ pub async fn dismiss_attention(
 ) -> AppResult<()> {
     blocking(&runtime, move |rt| {
         rt.dismiss_attention(project_id, &attention_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn set_launch_profiles(
+    runtime: Rt<'_>,
+    project_id: ProjectId,
+    profiles: Vec<LaunchProfileInput>,
+) -> AppResult<()> {
+    blocking(&runtime, move |rt| {
+        rt.set_launch_profiles(project_id, profiles)
     })
     .await
 }

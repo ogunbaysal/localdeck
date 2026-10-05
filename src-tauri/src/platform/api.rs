@@ -8,7 +8,7 @@ use super::command::{self, Os};
 use super::editors::{self, Locator};
 use super::{managed, terminal};
 use crate::error::{AppError, AppResult};
-use crate::models::{EditorInfo, PrimaryCommand};
+use crate::models::{EditorInfo, PrimaryCommand, TerminalInfo};
 
 pub use super::shell_path::user_path;
 pub use super::signals::send_signal;
@@ -65,16 +65,32 @@ pub fn open_in_editor(editor_id: &str, path: &Path) -> AppResult<()> {
     editors::editor_command(os, &launcher, &target).run()
 }
 
-/// Opens the system/user terminal in `path`.
-pub fn open_terminal(path: &Path) -> AppResult<()> {
+/// Every terminal LocalDeck knows for this OS, flagged by whether it is installed.
+pub fn detect_terminals() -> Vec<TerminalInfo> {
+    match Os::current() {
+        Ok(os) => terminal::catalogue(os, &terminal::TerminalLocator::for_os(os)),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Opens a terminal in `path`: the chosen one (`terminal_id`), or the platform
+/// default. An unknown or missing terminal is an error, never a substitute.
+pub fn open_terminal(path: &Path, terminal_id: Option<&str>) -> AppResult<()> {
     let dir = absolute_existing(path, true)?;
-    terminal::command(Os::current()?, &dir)?.run()
+    let os = Os::current()?;
+    terminal::command(
+        os,
+        &dir,
+        terminal_id,
+        &terminal::TerminalLocator::for_os(os),
+    )?
+    .run()
 }
 
 /// Starts a LocalDeck-managed command with the user's `PATH`. The caller owns the returned child
 /// and must `wait()` it. May block on first use while the user PATH is resolved.
-pub fn spawn_managed(command: &PrimaryCommand) -> AppResult<Child> {
-    managed::spawn(command, user_path())
+pub fn spawn_managed(command: &PrimaryCommand, env: &[(String, String)]) -> AppResult<Child> {
+    managed::spawn(command, env, user_path())
 }
 
 /// `path` as an absolute path, if it exists (and is a directory when `dir_only`). Absolute paths
@@ -127,8 +143,8 @@ mod tests {
 
         assert!(is_path_not_found(open_folder(&missing)));
         assert!(is_path_not_found(open_folder(&file)));
-        assert!(is_path_not_found(open_terminal(&missing)));
-        assert!(is_path_not_found(open_terminal(&file)));
+        assert!(is_path_not_found(open_terminal(&missing, None)));
+        assert!(is_path_not_found(open_terminal(&file, None)));
         assert!(is_path_not_found(open_in_editor("vscode", &missing)));
         assert!(is_path_not_found(open_in_editor("zed", Path::new(""))));
     }

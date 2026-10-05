@@ -10,9 +10,13 @@ use crate::error::{AppError, AppResult};
 use crate::models::PrimaryCommand;
 
 /// Starts `command` as `program + args[]` in `command.cwd` (never through a shell) with
-/// `path_var` as its `PATH`. The child gets its own process group, so it outlives LocalDeck and is
+/// `path_var` as its `PATH` plus the extra `env` pairs (never persisted). The child gets its own process group, so it outlives LocalDeck and is
 /// not hit by signals aimed at LocalDeck's group, like a job started from a terminal.
-pub(crate) fn spawn(command: &PrimaryCommand, path_var: &OsStr) -> AppResult<Child> {
+pub(crate) fn spawn(
+    command: &PrimaryCommand,
+    env: &[(String, String)],
+    path_var: &OsStr,
+) -> AppResult<Child> {
     let cwd = Path::new(&command.cwd);
     if !cwd.is_dir() {
         return Err(AppError::PathNotFound(command.cwd.clone()));
@@ -21,6 +25,7 @@ pub(crate) fn spawn(command: &PrimaryCommand, path_var: &OsStr) -> AppResult<Chi
     Command::new(program)
         .args(&command.args)
         .current_dir(cwd)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .env("PATH", path_var)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -95,7 +100,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().join("my proj ünï 日本");
         std::fs::create_dir(&cwd).unwrap();
-        let child = spawn(&command("sleep", &["30"], &cwd), OsStr::new(SYSTEM_PATH)).unwrap();
+        let child = spawn(
+            &command("sleep", &["30"], &cwd),
+            &[],
+            OsStr::new(SYSTEM_PATH),
+        )
+        .unwrap();
         assert_eq!(pgid(&child), child.id() as libc::pid_t);
         assert_ne!(pgid(&child), unsafe { libc::getpgrp() });
         stop(child);
@@ -108,8 +118,12 @@ mod tests {
         std::fs::create_dir(&cwd).unwrap();
         let path_var = format!("{SYSTEM_PATH}:/custom dir/ü");
         let script = r#"printf '%s\n%s\n' "$PATH" "$(pwd -P)" > out.txt; echo to-stdout; echo to-stderr >&2; read line || echo eof >> out.txt"#;
-        let mut child =
-            spawn(&command("sh", &["-c", script], &cwd), OsStr::new(&path_var)).unwrap();
+        let mut child = spawn(
+            &command("sh", &["-c", script], &cwd),
+            &[],
+            OsStr::new(&path_var),
+        )
+        .unwrap();
         assert!(child.wait().unwrap().success());
         let out = std::fs::read_to_string(cwd.join("out.txt")).unwrap();
         let mut lines = out.lines();
@@ -135,6 +149,7 @@ mod tests {
                 &["-c", r#"printf %s "$0" > arg.txt"#, arg],
                 tmp.path(),
             ),
+            &[],
             OsStr::new(SYSTEM_PATH),
         )
         .unwrap();
@@ -150,6 +165,7 @@ mod tests {
     fn relative_program_paths_resolve_against_the_command_cwd() {
         let mut child = spawn(
             &command("./sleep", &["30"], Path::new("/bin")),
+            &[],
             OsStr::new(""),
         )
         .unwrap();
@@ -157,6 +173,7 @@ mod tests {
         child.wait().unwrap();
         let child = spawn(
             &command("/bin/sleep", &["30"], Path::new("/")),
+            &[],
             OsStr::new(""),
         )
         .unwrap();
@@ -167,7 +184,12 @@ mod tests {
     fn missing_cwd_is_path_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("gone ünï");
-        let err = spawn(&command("sleep", &["1"], &missing), OsStr::new(SYSTEM_PATH)).unwrap_err();
+        let err = spawn(
+            &command("sleep", &["1"], &missing),
+            &[],
+            OsStr::new(SYSTEM_PATH),
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, AppError::PathNotFound(p) if Path::new(p) == missing),
             "{err:?}"
@@ -175,7 +197,12 @@ mod tests {
 
         let file = tmp.path().join("file.txt");
         std::fs::write(&file, "").unwrap();
-        let err = spawn(&command("sleep", &["1"], &file), OsStr::new(SYSTEM_PATH)).unwrap_err();
+        let err = spawn(
+            &command("sleep", &["1"], &file),
+            &[],
+            OsStr::new(SYSTEM_PATH),
+        )
+        .unwrap_err();
         assert!(matches!(err, AppError::PathNotFound(_)));
     }
 
@@ -184,6 +211,7 @@ mod tests {
         let cwd = Path::new("/");
         let err = spawn(
             &command("definitely-not-a-real-bun", &[], cwd),
+            &[],
             OsStr::new(SYSTEM_PATH),
         )
         .unwrap_err();
@@ -199,7 +227,7 @@ mod tests {
             "/etc/hosts",
             "/etc",
         ] {
-            let err = spawn(&command(program, &[], cwd), OsStr::new(SYSTEM_PATH)).unwrap_err();
+            let err = spawn(&command(program, &[], cwd), &[], OsStr::new(SYSTEM_PATH)).unwrap_err();
             assert!(
                 matches!(err, AppError::CommandSpawnFailed(_)),
                 "{program:?}: {err:?}"
@@ -211,6 +239,7 @@ mod tests {
     fn embedded_nul_in_arguments_is_a_spawn_failure() {
         let err = spawn(
             &command("sleep", &["1\0 2"], Path::new("/")),
+            &[],
             OsStr::new(SYSTEM_PATH),
         )
         .unwrap_err();

@@ -110,6 +110,12 @@ impl Database {
         Ok(events)
     }
 
+    /// Remove every activity row.
+    pub fn clear_activity(&mut self) -> AppResult<()> {
+        self.conn.execute("DELETE FROM activity", [])?;
+        Ok(())
+    }
+
     pub fn activity_count(&self) -> AppResult<usize> {
         let count: i64 = self
             .conn
@@ -224,6 +230,7 @@ mod tests {
                 component: Some("web app".into()),
                 exit_code: Some(137),
                 detected: true,
+                attempt: None,
             },
             created_at: 42,
         };

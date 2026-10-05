@@ -7,8 +7,8 @@ import { dismissAttention } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { AttentionItem, AttentionKind } from "@/types";
 
-/** Failures read as errors; conflicts and exits are warnings. */
-const SEVERE: ReadonlySet<AttentionKind> = new Set(["actionFailed", "runtimeLost"]);
+/** Failures read as errors; conflicts and one-off exits are warnings. */
+const SEVERE: ReadonlySet<AttentionKind> = new Set(["actionFailed", "runtimeLost", "autoRestartGaveUp"]);
 
 const AttentionRow = memo(function AttentionRow({
   projectId,

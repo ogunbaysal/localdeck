@@ -13,6 +13,7 @@ import {
 } from "@/stores/runtime-store";
 import { useUiStore } from "@/stores/ui-store";
 import type { EditorInfo, Project } from "@/types";
+import { AddProjectButton } from "./add-project-button";
 import { ProjectCard } from "./ProjectCard";
 import { ProjectsToolbar } from "./ProjectsToolbar";
 import { RememberedProjects } from "./RememberedProjects";
@@ -114,6 +115,7 @@ export function ProjectsPage() {
               )}
             </>
           }
+          action={<AddProjectButton variant="secondary" />}
         />
         {stopped.length > 0 && (
           <section aria-label="Previously discovered" className="flex flex-col gap-2">
@@ -165,6 +167,7 @@ export function ProjectsPage() {
         title="Projects"
         count={visible.length}
         description={visible.length > 0 ? `${totals.live} running · ${totals.remembered} stopped` : undefined}
+        actions={<AddProjectButton />}
       />
       {visible.length > 0 && (
         <ProjectsToolbar query={query} onQueryChange={setQuery} filter={filter} onFilterChange={setFilter} />

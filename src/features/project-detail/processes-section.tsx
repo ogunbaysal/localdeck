@@ -17,6 +17,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { copyToClipboard, runAction } from "@/lib/actions";
 import { formatBytes, formatCpu, formatUptime } from "@/lib/format";
 import { forceKillProcess, openProcessCwd, terminateProcess } from "@/lib/tauri";
+import { killCommand } from "@/lib/shell-quote";
 import { cn } from "@/lib/utils";
 import { selectDiagnosticsExpanded, useUiStore } from "@/stores/ui-store";
 import type { ProcessInfo } from "@/types";
@@ -41,6 +42,9 @@ interface RowActions {
   /** Opens the confirmation dialog; the kill itself only runs after the explicit confirm. */
   onForceKill: (process: ProcessInfo) => void;
   onCopyCommand: (process: ProcessInfo) => void;
+  onCopyPid: (process: ProcessInfo) => void;
+  /** Copies `kill -TERM <pid>` / `kill -KILL <pid>` for the user's own shell; nothing is run. */
+  onCopyKill: (process: ProcessInfo, force: boolean) => void;
   onOpenCwd: (process: ProcessInfo) => void;
 }
 
@@ -52,6 +56,16 @@ const ROW_ACTIONS: Omit<RowActions, "onForceKill"> = {
   },
   onCopyCommand: (process) => {
     void runAction("Copy command", () => copyToClipboard(commandLine(process)), { success: "Command copied" });
+  },
+  onCopyPid: (process) => {
+    void runAction("Copy PID", () => copyToClipboard(String(process.pid)), { success: "PID copied" });
+  },
+  onCopyKill: (process, force) => {
+    void runAction(
+      force ? "Copy force-kill command" : "Copy kill command",
+      () => copyToClipboard(killCommand(process.pid, force)),
+      { success: force ? "Force-kill command copied (not run)" : "Kill command copied (not run)" },
+    );
   },
   onOpenCwd: (process) => {
     void runAction("Open working directory", () => openProcessCwd(process.pid), {
@@ -132,12 +146,24 @@ const ProcessRow = memo(function ProcessRow({
               <Copy aria-hidden />
               Copy command
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => actions.onCopyPid(process)}>
+              <Copy aria-hidden />
+              Copy PID
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => actions.onCopyKill(process, false)}>
+              <Copy aria-hidden />
+              Copy kill command (SIGTERM)
+            </DropdownMenuItem>
             <DropdownMenuItem disabled={process.cwd === null} onSelect={() => actions.onOpenCwd(process)}>
               <FolderOpen aria-hidden />
               Open working directory
               {process.cwd === null && <span className="sr-only"> (unavailable: the OS didn't report one)</span>}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={() => actions.onCopyKill(process, true)}>
+              <Copy aria-hidden />
+              Copy force-kill command (SIGKILL)
+            </DropdownMenuItem>
             <DropdownMenuItem variant="destructive" onSelect={() => actions.onForceKill(process)}>
               <OctagonX aria-hidden />
               Force Kill…

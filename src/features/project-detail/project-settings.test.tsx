@@ -5,7 +5,7 @@ import { Route, Routes } from "react-router";
 import { backend } from "@/test/backend";
 import { makeCommand, makeProject, makeRunningProject, makeSnapshot } from "@/test/fixtures";
 import { renderWithProviders } from "@/test/render";
-import type { EditorInfo, Project, ProjectScripts } from "@/types";
+import type { EditorInfo, Project, ProjectScripts, StartOption, TerminalInfo } from "@/types";
 import { ProjectDetailPage } from "./ProjectDetailPage";
 import { looseUrlProblem } from "./project-settings-dialog";
 
@@ -22,18 +22,28 @@ const editors: EditorInfo[] = [
   { id: "vscode", name: "VS Code", available: false },
 ];
 
+const terminals: TerminalInfo[] = [
+  { id: "terminal", name: "Terminal", available: true },
+  { id: "warp", name: "Warp", available: false },
+];
+
+const options: StartOption[] = [
+  { id: "pkg:dev", source: "packageJson", name: "dev", label: "bun run dev", detail: "vite --port 5173" },
+  { id: "pkg:build", source: "packageJson", name: "build", label: "bun run build", detail: "tsc && vite build" },
+  { id: "make:serve", source: "makefile", name: "serve", label: "make serve", detail: null },
+  { id: "compose:up", source: "compose", name: "up", label: "docker compose up", detail: null },
+];
+
 const scripts: ProjectScripts = {
   packageManager: "bun",
   packageManagerDetected: true,
-  scripts: [
-    { name: "dev", command: "vite --port 5173" },
-    { name: "build", command: "tsc && vite build" },
-  ],
-  primaryScript: null,
+  options,
+  primaryOption: null,
 };
 
 async function setup(project: Project, projectScripts: ProjectScripts = scripts) {
   backend.reply("list_editors", editors);
+  backend.reply("list_terminals", terminals);
   backend.reply("list_project_scripts", projectScripts);
   const view = renderWithProviders(
     <Routes>
@@ -64,13 +74,13 @@ describe("looseUrlProblem", () => {
 });
 
 describe("project settings dialog", () => {
-  test("is prefilled from the overrides and saves all three fields", async () => {
+  test("is prefilled from the overrides and saves every field", async () => {
     backend.reply("set_project_override", undefined);
     const project = makeRunningProject({
       id: 7,
       name: "Renamed",
       detectedName: "localdeck",
-      overrides: { displayName: "Renamed", primaryUrl: null, preferredEditor: null },
+      overrides: { displayName: "Renamed", primaryUrl: null, preferredEditor: null, preferredTerminal: null, autoRestart: false },
     });
     const { user } = await setup(project);
     const dialog = within(await openSettings(user));
@@ -91,7 +101,13 @@ describe("project settings dialog", () => {
       expect(backend.callsTo("set_project_override")).toEqual([
         {
           projectId: 7,
-          overrides: { displayName: "My app", primaryUrl: "localhost:4000", preferredEditor: "zed" },
+          overrides: {
+            displayName: "My app",
+            primaryUrl: "localhost:4000",
+            preferredEditor: "zed",
+            preferredTerminal: null,
+            autoRestart: false,
+          },
         },
       ]),
     );
@@ -102,7 +118,13 @@ describe("project settings dialog", () => {
     backend.reply("set_project_override", undefined);
     const project = makeRunningProject({
       id: 7,
-      overrides: { displayName: "Old", primaryUrl: "http://localhost:1", preferredEditor: "zed" },
+      overrides: {
+        displayName: "Old",
+        primaryUrl: "http://localhost:1",
+        preferredEditor: "zed",
+        preferredTerminal: "terminal",
+        autoRestart: true,
+      },
     });
     const { user } = await setup(project);
     const dialog = within(await openSettings(user));
@@ -110,10 +132,52 @@ describe("project settings dialog", () => {
     await user.clear(dialog.getByLabelText("Primary URL override"));
     await user.click(dialog.getByRole("combobox", { name: "Preferred editor" }));
     await user.click(await screen.findByRole("option", { name: "Use global default" }));
+    await user.click(dialog.getByRole("combobox", { name: "Terminal" }));
+    await user.click(await screen.findByRole("option", { name: "Use global default" }));
+    await user.click(dialog.getByRole("switch", { name: "Auto-restart" }));
     await user.click(dialog.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(backend.callsTo("set_project_override")).toEqual([
-        { projectId: 7, overrides: { displayName: null, primaryUrl: null, preferredEditor: null } },
+        {
+          projectId: 7,
+          overrides: {
+            displayName: null,
+            primaryUrl: null,
+            preferredEditor: null,
+            preferredTerminal: null,
+            autoRestart: false,
+          },
+        },
+      ]),
+    );
+  });
+
+  test("the terminal and auto-restart choices are saved in the same override object", async () => {
+    backend.reply("set_project_override", undefined);
+    const { user } = await setup(makeRunningProject({ id: 7 }));
+    const dialog = within(await openSettings(user));
+
+    await user.click(dialog.getByRole("combobox", { name: "Terminal" }));
+    expect(await screen.findByRole("option", { name: /Warp.*not installed/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "Terminal" }));
+    const restart = dialog.getByRole("switch", { name: "Auto-restart" });
+    expect(restart).not.toBeChecked();
+    expect(dialog.getByText(/up to 5 attempts with increasing delay/)).toBeInTheDocument();
+    await user.click(restart);
+    await user.click(dialog.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(backend.callsTo("set_project_override")).toEqual([
+        {
+          projectId: 7,
+          overrides: {
+            displayName: null,
+            primaryUrl: null,
+            preferredEditor: null,
+            preferredTerminal: "terminal",
+            autoRestart: true,
+          },
+        },
       ]),
     );
   });
@@ -161,27 +225,34 @@ describe("project settings dialog", () => {
 });
 
 describe("primary start command", () => {
-  test("choosing a script and clearing it call set_primary_command", async () => {
+  test("lists options grouped by source; choosing and clearing call set_primary_command with option ids", async () => {
     backend.reply("set_primary_command", undefined);
-    const project = makeRunningProject({ id: 7, primaryCommand: makeCommand({ label: "bun run dev", script: "dev" }) });
-    const { user } = await setup(project, { ...scripts, primaryScript: "dev" });
+    const project = makeRunningProject({
+      id: 7,
+      primaryCommand: makeCommand({ label: "bun run dev", script: "pkg:dev" }),
+    });
+    const { user } = await setup(project, { ...scripts, primaryOption: "pkg:dev" });
     const dialog = within(await openSettings(user));
 
-    expect(await dialog.findByRole("radio", { name: /dev/ })).toBeChecked();
-    expect(dialog.getByText("bun run dev")).toBeInTheDocument();
+    expect(await dialog.findByRole("radio", { name: /bun run dev/ })).toBeChecked();
+    for (const heading of ["Package scripts", "Makefile", "Docker Compose"]) {
+      expect(dialog.getByRole("radiogroup", { name: heading })).toBeInTheDocument();
+    }
+    expect(dialog.queryByRole("radiogroup", { name: "Cargo" })).not.toBeInTheDocument();
+    expect(within(dialog.getByRole("radiogroup", { name: "Makefile" })).getByText("make serve")).toBeInTheDocument();
     expect(dialog.getByText("tsc && vite build")).toBeInTheDocument();
 
-    // The backend reports the new primary script on the reload that follows the change.
-    backend.reply("list_project_scripts", { ...scripts, primaryScript: "build" });
-    await user.click(dialog.getByRole("radio", { name: /build/ }));
-    await waitFor(() => expect(backend.callsTo("set_primary_command")).toEqual([{ projectId: 7, script: "build" }]));
+    // The backend reports the new primary option on the reload that follows the change.
+    backend.reply("list_project_scripts", { ...scripts, primaryOption: "make:serve" });
+    await user.click(dialog.getByRole("radio", { name: /make serve/ }));
+    await waitFor(() => expect(backend.callsTo("set_primary_command")).toEqual([{ projectId: 7, option: "make:serve" }]));
     await waitFor(() => expect(backend.callsTo("list_project_scripts")).toHaveLength(2));
-    expect(await dialog.findByRole("radio", { name: /build/ })).toBeChecked();
+    expect(await dialog.findByRole("radio", { name: /make serve/ })).toBeChecked();
     await user.click(dialog.getByRole("button", { name: "Clear" }));
     await waitFor(() =>
       expect(backend.callsTo("set_primary_command")).toEqual([
-        { projectId: 7, script: "build" },
-        { projectId: 7, script: null },
+        { projectId: 7, option: "make:serve" },
+        { projectId: 7, option: null },
       ]),
     );
   });
@@ -192,15 +263,17 @@ describe("primary start command", () => {
     expect(await dialog.findByText(/assumed/)).toBeInTheDocument();
   });
 
-  test("explains that v0.1 reads package.json scripts when there are none", async () => {
-    const { user } = await setup(makeProject({ id: 7 }), { ...scripts, scripts: [] });
+  test("explains which files are read when there are no options", async () => {
+    const { user } = await setup(makeProject({ id: 7 }), { ...scripts, options: [] });
     const dialog = within(await openSettings(user));
-    expect(await dialog.findByText(/reads start commands from package\.json scripts/)).toBeInTheDocument();
+    const hint = await dialog.findByText(/LocalDeck reads package\.json scripts, Makefile targets/);
+    expect(hint).toHaveTextContent(/justfile.*composer\.json.*Cargo\.toml.*docker-compose.*pyproject\.toml/);
     expect(dialog.queryByRole("radio")).not.toBeInTheDocument();
   });
 
   test("a failed script listing shows the backend error with a retry", async () => {
     backend.reply("list_editors", editors);
+    backend.reply("list_terminals", terminals);
     backend.fail("list_project_scripts", { code: "PATH_NOT_FOUND", message: "package.json is missing" });
     const project = makeProject({ id: 7 });
     const { user } = renderWithProviders(

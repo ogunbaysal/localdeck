@@ -30,6 +30,7 @@ pub enum AttentionKind {
     ManagedExited,
     RuntimeLost,
     ActionFailed,
+    AutoRestartGaveUp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +114,9 @@ pub struct ProjectOverrides {
     pub display_name: Option<String>,
     pub primary_url: Option<String>,
     pub preferred_editor: Option<String>,
+    pub preferred_terminal: Option<String>,
+    /// Restart managed commands that exit unexpectedly (bounded backoff).
+    pub auto_restart: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +143,7 @@ pub struct Project {
     pub ports: Vec<u16>,
     pub primary_url: Option<PrimaryUrl>,
     pub primary_command: Option<PrimaryCommand>,
+    pub launch_profiles: Vec<LaunchProfile>,
     pub overrides: ProjectOverrides,
     pub metrics: Metrics,
     #[cfg_attr(test, ts(type = "number"))]
@@ -158,7 +163,37 @@ pub struct PackageScript {
     pub command: String,
 }
 
-/// `package.json` scripts plus the package manager LocalDeck would use.
+/// Where a start option was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub enum StartSource {
+    PackageJson,
+    Makefile,
+    Just,
+    Composer,
+    Cargo,
+    Compose,
+    Pyproject,
+}
+
+/// One command LocalDeck can run for a project (never a shell string).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct StartOption {
+    /// Stable id such as `pkg:dev`, `make:serve`, `just:dev`, `composer:serve`,
+    /// `cargo:run`, `compose:up`, `py:dev`.
+    pub id: String,
+    pub source: StartSource,
+    pub name: String,
+    /// Display form of the spawned command, e.g. `bun run dev`.
+    pub label: String,
+    /// Script body or description, when the source has one.
+    pub detail: Option<String>,
+}
+
+/// Start options discovered from project files, plus the package manager.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +201,30 @@ pub struct ProjectScripts {
     pub package_manager: PackageManager,
     /// False when the manager is only the default because no lockfile exists.
     pub package_manager_detected: bool,
-    pub scripts: Vec<PackageScript>,
-    pub primary_script: Option<String>,
+    pub options: Vec<StartOption>,
+    /// Option id of the current primary command.
+    pub primary_option: Option<String>,
+}
+
+/// A named set of commands started together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchProfile {
+    pub id: String,
+    pub name: String,
+    pub commands: Vec<PrimaryCommand>,
+}
+
+/// Frontend input for creating/updating profiles. Commands are re-derived from
+/// option ids by the backend; the frontend never supplies programs or args.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchProfileInput {
+    #[serde(default)]
+    #[cfg_attr(test, ts(optional))]
+    pub id: Option<String>,
+    pub name: String,
+    pub options: Vec<String>,
 }

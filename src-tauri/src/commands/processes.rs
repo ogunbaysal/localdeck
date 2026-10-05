@@ -31,13 +31,29 @@ pub async fn force_kill_process(
 }
 
 #[tauri::command]
-pub async fn start_project(runtime: Rt<'_>, project_id: ProjectId) -> AppResult<()> {
-    blocking(&runtime, move |rt| rt.start_project(project_id)).await
+pub async fn start_project(
+    runtime: Rt<'_>,
+    project_id: ProjectId,
+    profile_id: Option<String>,
+    port: Option<u16>,
+) -> AppResult<()> {
+    blocking(&runtime, move |rt| {
+        rt.start_project(project_id, profile_id, port)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn restart_project(runtime: Rt<'_>, project_id: ProjectId) -> AppResult<()> {
-    blocking(&runtime, move |rt| rt.restart_project(project_id)).await
+pub async fn restart_project(
+    runtime: Rt<'_>,
+    project_id: ProjectId,
+    profile_id: Option<String>,
+    port: Option<u16>,
+) -> AppResult<()> {
+    blocking(&runtime, move |rt| {
+        rt.restart_project(project_id, profile_id, port)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -48,4 +64,10 @@ pub async fn stop_project(runtime: Rt<'_>, project_id: ProjectId) -> AppResult<S
 #[tauri::command]
 pub async fn force_stop_project(runtime: Rt<'_>, project_id: ProjectId) -> AppResult<StopReport> {
     blocking(&runtime, move |rt| rt.stop_project(project_id, true)).await
+}
+
+/// Next free loopback port at or after `preferred`.
+#[tauri::command]
+pub async fn suggest_free_port(runtime: Rt<'_>, preferred: u16) -> AppResult<u16> {
+    blocking(&runtime, move |rt| rt.suggest_free_port(preferred)).await
 }

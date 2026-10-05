@@ -211,7 +211,7 @@ describe("stopped project", () => {
     expect(screen.queryByRole("button", { name: "Restart" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Start" }));
-    expect(backend.callsTo("start_project")).toEqual([{ projectId: 1 }]);
+    expect(backend.callsTo("start_project")).toEqual([{ projectId: 1, profileId: null, port: null }]);
   });
 
   test("Start is disabled with the reason when no command is configured", async () => {

@@ -8,9 +8,11 @@ pub mod commands;
 pub mod engine;
 pub mod error;
 pub mod models;
+pub mod notify;
 pub mod persistence;
 pub mod platform;
 pub mod services;
+pub mod shortcut;
 pub mod tray;
 
 use engine::Engine;
@@ -26,6 +28,10 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 pub const RUNTIME_EVENT: &str = "runtime://updated";
 /// Project id payload, emitted when a tray project entry is chosen.
 pub const OPEN_PROJECT_EVENT: &str = "ui://open-project";
+/// Emitted by the global shortcut: show the window and open the command palette.
+pub const OPEN_PALETTE_EVENT: &str = "ui://open-palette";
+/// Emitted when a tray quick action fails (payload: `ErrorPayload`).
+pub const ACTION_FAILED_EVENT: &str = "ui://action-failed";
 const DATABASE_FILE: &str = "localdeck.db";
 
 fn init_tracing() {
@@ -80,19 +86,44 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let first = scanner.scan_once(&runtime);
     app.manage(runtime.clone());
 
-    let tray_ok = tray::install(&handle, &tray::summarize(&first));
+    // Resolve the user's login-shell PATH off the scanner thread, so the first
+    // Start click does not wait for it.
+    std::thread::spawn(|| {
+        platform::user_path();
+    });
+
+    // Restore the global shortcut; a failure (taken by another app) is not fatal.
+    if let Some(accelerator) = runtime.settings().global_shortcut {
+        if let Err(err) = shortcut::apply(&handle, None, Some(&accelerator)) {
+            tracing::warn!(%err, "could not register the global shortcut");
+        }
+    }
+
+    let tray_ok = tray::install(&handle, &first);
+    // Startup detections are not alert-worthy.
+    runtime.drain_notifications();
     let emitter = handle.clone();
+    let alerts = runtime.clone();
+    let pacing = runtime.clone();
     spawn_scanner(runtime, scanner, move |snapshot| {
-        if let Err(err) = emitter.emit(RUNTIME_EVENT, &*snapshot) {
-            tracing::warn!(%err, "could not emit runtime update");
+        // Nobody renders the snapshot while the window is hidden; skip the
+        // serialisation and IPC. The tray and notifications still update.
+        if pacing.pacing.window_active() {
+            if let Err(err) = emitter.emit(RUNTIME_EVENT, &*snapshot) {
+                tracing::warn!(%err, "could not emit runtime update");
+            }
         }
         tray::refresh(&emitter, &snapshot);
+        notify::deliver(&emitter, &alerts.drain_notifications());
     })?;
 
     // Launched at login (`--hidden`) with a tray: stay out of the way.
     let start_hidden = std::env::args().any(|arg| arg == "--hidden");
     if !(start_hidden && tray_ok) {
         tray::show_main_window(&handle);
+    } else {
+        // Tray-only start: begin on the slow background cadence.
+        tray::sync_window_state(&handle);
     }
     Ok(())
 }
@@ -104,6 +135,7 @@ pub fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri
         commands::get_settings,
         commands::update_settings,
         commands::list_editors,
+        commands::list_terminals,
         commands::set_project_override,
         commands::set_component_kind,
         commands::set_project_favorite,
@@ -126,6 +158,13 @@ pub fn register_commands<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri
         commands::open_project_editor,
         commands::open_project_terminal,
         commands::open_process_cwd,
+        commands::set_launch_profiles,
+        commands::suggest_free_port,
+        commands::pick_and_add_project,
+        commands::export_overrides,
+        commands::import_overrides,
+        commands::list_activity,
+        commands::clear_activity,
     ])
 }
 
@@ -137,14 +176,27 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
+        .plugin(shortcut::plugin())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .on_window_event(|window, event| {
-            // Closing the window keeps LocalDeck scanning from the tray.
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" && tray::is_available(window.app_handle()) {
-                    api.prevent_close();
-                    let _ = window.hide();
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                // Closing the window keeps LocalDeck scanning from the tray.
+                WindowEvent::CloseRequested { api, .. } => {
+                    if tray::is_available(window.app_handle()) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        tray::sync_window_state(window.app_handle());
+                    }
                 }
+                WindowEvent::Focused(_) | WindowEvent::Resized(_) => {
+                    tray::sync_window_state(window.app_handle());
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

@@ -4,7 +4,7 @@
 
 use super::runtime::{lock, Runtime};
 use crate::engine::url::validate_http_url;
-use crate::engine::{stack_detector::primary_command_for_script, STOPPED_STACK_TTL};
+use crate::engine::{start_options, STOPPED_STACK_TTL};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     ComponentKind, PackageManager, ProjectId, ProjectOverrides, ProjectScripts, RuntimeStatus,
@@ -23,6 +23,15 @@ fn blank_to_none(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn validate_terminal(id: &Option<String>) -> AppResult<()> {
+    if let Some(id) = id {
+        if !platform::detect_terminals().iter().any(|t| &t.id == id) {
+            return Err(AppError::InvalidInput(format!("Unknown terminal '{id}'")));
+        }
+    }
+    Ok(())
+}
+
 fn validate_editor(id: &Option<String>) -> AppResult<()> {
     if let Some(id) = id {
         if !platform::detect_editors().iter().any(|e| &e.id == id) {
@@ -33,6 +42,15 @@ fn validate_editor(id: &Option<String>) -> AppResult<()> {
 }
 
 impl Runtime {
+    pub(super) fn with_project_pub<R>(
+        &self,
+        id: ProjectId,
+        edit: impl FnOnce(&mut crate::persistence::Database) -> AppResult<R>,
+        mirror: impl FnOnce(&mut crate::persistence::ProjectRecord),
+    ) -> AppResult<R> {
+        self.with_project(id, edit, mirror)
+    }
+
     fn with_project<R>(
         &self,
         id: ProjectId,
@@ -75,17 +93,24 @@ impl Runtime {
         };
         let editor = blank_to_none(overrides.preferred_editor);
         validate_editor(&editor)?;
+        let terminal = blank_to_none(overrides.preferred_terminal);
+        validate_terminal(&terminal)?;
+        let auto_restart = overrides.auto_restart;
         self.with_project(
             id,
             |db| {
                 db.set_display_name(id, name.as_deref())?;
                 db.set_primary_url(id, url.as_deref())?;
-                db.set_preferred_editor(id, editor.as_deref())
+                db.set_preferred_editor(id, editor.as_deref())?;
+                db.set_preferred_terminal(id, terminal.as_deref())?;
+                db.set_auto_restart(id, auto_restart)
             },
             |record| {
                 record.display_name = name.clone();
                 record.primary_url = url.clone();
                 record.preferred_editor = editor.clone();
+                record.preferred_terminal = terminal.clone();
+                record.auto_restart = auto_restart;
             },
         )
     }
@@ -200,30 +225,47 @@ impl Runtime {
         Ok(ProjectScripts {
             package_manager: fingerprint.package_manager.unwrap_or(PackageManager::Npm),
             package_manager_detected: fingerprint.package_manager_detected,
-            scripts: fingerprint.scripts.clone(),
-            primary_script,
+            options: start_options::discover(&root, &fingerprint)
+                .into_iter()
+                .map(|spec| spec.option)
+                .collect(),
+            // Values stored by v0.1 were bare package-script names.
+            primary_option: primary_script.map(|s| {
+                if s.contains(':') {
+                    s
+                } else {
+                    format!("pkg:{s}")
+                }
+            }),
         })
     }
 
-    /// Persist `<package-manager> run <script>` as the project's primary command.
-    pub fn set_primary_command(&self, id: ProjectId, script: Option<String>) -> AppResult<()> {
-        let command = match blank_to_none(script) {
+    /// Resolve a start-option id (`pkg:dev`, ...) into a spawnable command by
+    /// re-reading the project's files. The frontend never supplies programs or args.
+    pub fn derive_command(
+        &self,
+        id: ProjectId,
+        option_id: &str,
+    ) -> AppResult<crate::models::PrimaryCommand> {
+        let root = self.root_of(id)?;
+        let fingerprint = {
+            let mut engine = lock(&self.engine);
+            engine.invalidate(&root);
+            engine.stack_for(&root, Instant::now(), STOPPED_STACK_TTL)
+        };
+        let spec = start_options::resolve(&root, &fingerprint, option_id).ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "'{option_id}' is not a start option of this project"
+            ))
+        })?;
+        Ok(start_options::to_command(&root, &spec))
+    }
+
+    /// Persist the chosen start option as the project's primary command.
+    pub fn set_primary_command(&self, id: ProjectId, option: Option<String>) -> AppResult<()> {
+        let command = match blank_to_none(option) {
             None => None,
-            Some(script) => {
-                let root = self.root_of(id)?;
-                let fingerprint = {
-                    let mut engine = lock(&self.engine);
-                    engine.invalidate(&root);
-                    engine.stack_for(&root, Instant::now(), STOPPED_STACK_TTL)
-                };
-                Some(
-                    primary_command_for_script(&root, &fingerprint, &script).ok_or_else(|| {
-                        AppError::InvalidInput(format!(
-                            "package.json has no script named '{script}'"
-                        ))
-                    })?,
-                )
-            }
+            Some(option) => Some(self.derive_command(id, &option)?),
         };
         self.with_project(
             id,
@@ -249,6 +291,12 @@ impl Runtime {
         let mut settings = settings;
         settings.preferred_editor = blank_to_none(settings.preferred_editor);
         validate_editor(&settings.preferred_editor)?;
+        settings.preferred_terminal = blank_to_none(settings.preferred_terminal);
+        validate_terminal(&settings.preferred_terminal)?;
+        settings.global_shortcut = match blank_to_none(settings.global_shortcut) {
+            Some(raw) => Some(crate::shortcut::validate_accelerator(&raw)?),
+            None => None,
+        };
         if let Some(days) = settings.forget_after_days {
             if days == 0 || days > MAX_RETENTION_DAYS {
                 return Err(AppError::InvalidInput(
@@ -324,6 +372,8 @@ mod tests {
                     display_name: Some("  Pretty Name ".into()),
                     primary_url: Some("localhost:4321/app".into()),
                     preferred_editor: None,
+                    preferred_terminal: None,
+                    auto_restart: false,
                 },
             )
             .unwrap();
@@ -359,16 +409,22 @@ mod tests {
                 display_name: None,
                 primary_url: Some("file:///etc/passwd".into()),
                 preferred_editor: None,
+                preferred_terminal: None,
+                auto_restart: false,
             },
             ProjectOverrides {
                 display_name: None,
                 primary_url: None,
                 preferred_editor: Some("notepad".into()),
+                preferred_terminal: None,
+                auto_restart: false,
             },
             ProjectOverrides {
                 display_name: Some("x".repeat(500)),
                 primary_url: None,
                 preferred_editor: None,
+                preferred_terminal: None,
+                auto_restart: false,
             },
         ] {
             let err = runtime.set_project_override(id, bad).unwrap_err();
@@ -391,8 +447,8 @@ mod tests {
         let scripts = runtime.list_project_scripts(id).unwrap();
         assert_eq!(scripts.package_manager, PackageManager::Bun);
         assert!(scripts.package_manager_detected);
-        assert_eq!(scripts.scripts[0].name, "dev");
-        assert_eq!(scripts.primary_script, None);
+        assert_eq!(scripts.options[0].name, "dev");
+        assert_eq!(scripts.primary_option, None);
 
         runtime.set_primary_command(id, Some("dev".into())).unwrap();
         rescan(&runtime);
@@ -407,9 +463,9 @@ mod tests {
             runtime
                 .list_project_scripts(id)
                 .unwrap()
-                .primary_script
+                .primary_option
                 .as_deref(),
-            Some("dev")
+            Some("pkg:dev")
         );
 
         let err = runtime

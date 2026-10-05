@@ -1,5 +1,7 @@
 # LocalDeck
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A project-centric control center for local development on macOS and Linux.**
 
 LocalDeck discovers the development projects that are actually running on your machine, groups their processes and ports into a view you can reason about, remembers projects after they stop, and lets you inspect and control them from one native desktop app.
@@ -25,7 +27,15 @@ Operating-system tools answer those questions with unrelated PIDs and sockets. L
 - **Honest port ownership** — `Port → PID → Component → Project` only from PID/cwd/process-tree evidence. A global PostgreSQL or Redis stays *unassigned*; ambiguous sockets stay *ambiguous*. The Ports screen shows every listening endpoint, including unassigned ones, and answers “what owns port 3000?” immediately.
 - **Safe HTTP detection** — known dev servers are recognised directly; otherwise only already-discovered loopback endpoints are probed with a short-timeout `HEAD`/`GET`. No range scanning, no external hosts, redirects are never followed.
 - **Primary URL** — explicit override → Web component → known dev server → first confirmed HTTP endpoint. Wildcard listeners open as `localhost`.
-- **Project actions** — open URL / folder / editor (VS Code, Cursor, Zed, JetBrains) / terminal; start, stop, restart; graceful terminate **separate from** an explicit force kill; `package.json` script picker that persists `program + args[] + cwd` and spawns without a shell, using the detected package manager.
+- **Project actions** — open URL / folder / editor (VS Code, Cursor, Zed, JetBrains) / terminal (Terminal, iTerm2, Warp, Ghostty, kitty, Alacritty, WezTerm on macOS; the common emulators on Linux; chosen per project or globally); start, stop, restart; graceful terminate **separate from** an explicit force kill.
+- **Start commands from many sources** — `package.json` scripts (bun/pnpm/yarn/npm), Makefile targets, `just` recipes, Composer scripts, `cargo run`, `docker compose up` and Python (`uv`/`poetry`) scripts. LocalDeck persists only `program + args[] + cwd`, spawns without a shell, and re-derives every command from the project's files.
+- **Launch profiles** — named sets of commands started together ("web + api + worker"), all-or-nothing.
+- **Start on a free port** — port-conflict help: see who holds a port, get the next free one, and start with `PORT` (and `--port` for known dev servers).
+- **Optional auto-restart** — per project, for commands LocalDeck started: bounded exponential backoff (up to 5 attempts), then it gives up and tells you.
+- **Notifications and tray quick actions** — native alerts for crashes, port conflicts and lost components; the tray menu can open, restart, stop and start projects.
+- **Global shortcut** — an optional system-wide hotkey that opens the command palette.
+- **Activity** — a bounded global timeline (≈500 events) with project and kind filters.
+- **Add project manually** and **export/import overrides** — a secondary escape hatch and a portable backup. Exported files reference commands by script id only; importing never accepts a raw program or arguments.
 - **Memory** — projects, overrides, favourites, ignored projects, settings and a bounded activity history (≈500 events) live in a Rust-owned SQLite database. CPU/RAM/process/socket samples are never persisted.
 - **Native shell** — tray / menu-bar item with a running-project summary, launch at login, light/dark/system themes, global search and a command palette (`⌘K` on macOS, `Ctrl+K` on Linux).
 
@@ -33,7 +43,7 @@ Operating-system tools answer those questions with unrelated PIDs and sockets. L
 
 ```text
 React + TypeScript (presentation only)
-  Projects · Project detail · Ports · Settings · Command palette
+  Projects · Project detail · Ports · Activity · Settings · Command palette
   Zustand: runtime projection + UI state
         │  Tauri commands (explicit actions)   ▲  event `runtime://updated` (full AppSnapshot ~2 s)
 ┌───────▼─────────────────────────────────────┴──────────┐
@@ -95,6 +105,7 @@ src-tauri/src/
   engine/                deterministic discovery and classification
   services/              runtime state, scanner, compose, activity tracker, actions
   persistence/           SQLite schema, migrations, bounded activity
+  notify.rs, shortcut.rs native notifications and the global shortcut
   platform/              signals, open url/folder/editor/terminal, managed spawn (macOS + Linux)
   commands/              Tauri IPC surface
   tray.rs                tray / menu-bar item
@@ -103,7 +114,8 @@ src-tauri/src/
 ## Known limitations
 
 - **OS permissions limit what can be seen.** Processes owned by other users (and some system processes) expose only partial metadata, and their sockets may not report an owning PID. LocalDeck shows these as *limited access* / *owner not visible* instead of guessing. macOS App-Store-style sandboxing would restrict inspection further and is not a goal.
-- **Start commands come from `package.json` scripts** in v0.1 (bun, pnpm, yarn or npm, chosen from `packageManager`/lockfiles; npm is assumed if nothing is found). Projects without a `package.json` can still be discovered, observed and stopped.
+- **Start commands come from project files** (package scripts, Makefile, justfile, Composer, Cargo binaries, Compose files, Python scripts). The package manager is chosen from `packageManager`/lockfiles (npm is assumed if nothing is found). Projects with none of these can still be discovered, observed and stopped.
+- **Global shortcut and notifications depend on the OS**: another app may already own a shortcut (LocalDeck reports it and keeps the previous one), and notifications need the system's permission.
 - **Stop is graceful and root-only by design.** It sends `SIGTERM` to the root process of each component. If anything survives, LocalDeck offers an explicit Force Stop; it never escalates silently.
 - **Managed processes outlive LocalDeck.** Commands started from LocalDeck run in their own process group, like a terminal-launched job, and are rediscovered as external processes after a restart of LocalDeck.
 - **Non-UTF-8 paths** (Linux only) are discovered correctly but displayed lossily; file actions on such a project may fail with a structured error.
@@ -117,3 +129,7 @@ See the completion notes in the repository history for the exact commands run. I
 ## Non-goals (v0.1)
 
 Windows, cloud/accounts/telemetry, AI classification, Docker/Kubernetes management, logs, an embedded terminal, `.env`/secret management, database or HTTP clients, network inspection, launch profiles, auto-restart supervision, plugins, a CLI, dependency graphs and historical metrics.
+
+## License
+
+[MIT](LICENSE)

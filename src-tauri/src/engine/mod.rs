@@ -14,6 +14,7 @@ pub mod project_detector;
 pub mod providers;
 pub mod raw;
 pub mod stack_detector;
+pub mod start_options;
 pub mod tooling;
 pub mod url;
 

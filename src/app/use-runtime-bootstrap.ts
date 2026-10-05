@@ -1,16 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { toErrorPayload } from "@/lib/errors";
+import { toast } from "sonner";
+import { describeError, toErrorPayload } from "@/lib/errors";
 import {
   getSettings,
   getSnapshot,
+  listenActionFailed,
+  listenOpenPalette,
   listenOpenProject,
   listenRuntimeUpdates,
 } from "@/lib/tauri";
 import { useRuntimeStore } from "@/stores/runtime-store";
+import { useUiStore } from "@/stores/ui-store";
 
 /**
- * Startup sequence: subscribe to `runtime://updated` and `ui://open-project`, then load
- * the snapshot and settings. Any failure puts the runtime store into `status: "error"`
+ * Startup sequence: subscribe to `runtime://updated`, `ui://open-project`, `ui://open-palette`
+ * (global shortcut → open the palette) and `ui://action-failed` (failed tray quick action →
+ * error toast), then load the snapshot and settings. Any failure puts the runtime store into `status: "error"`
  * with the `ErrorPayload`; `retry()` runs the whole sequence again. Listeners are removed
  * on unmount and before every retry.
  */
@@ -38,6 +43,13 @@ export function useRuntimeBootstrap(onOpenProject: (projectId: number) => void):
       try {
         track(await listenRuntimeUpdates((snapshot) => store.setSnapshot(snapshot)));
         track(await listenOpenProject((projectId) => openProject.current(projectId)));
+        track(await listenOpenPalette(() => useUiStore.getState().setPaletteOpen(true)));
+        track(
+          await listenActionFailed((error) => {
+            const { title, message } = describeError(error);
+            toast.error(title, { description: message });
+          }),
+        );
         const [snapshot, settings] = await Promise.all([getSnapshot(), getSettings()]);
         if (disposed) return;
         store.setSnapshot(snapshot);

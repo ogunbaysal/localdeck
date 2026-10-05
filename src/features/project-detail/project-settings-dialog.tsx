@@ -17,12 +17,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { describeError, toErrorPayload } from "@/lib/errors";
 import { listProjectScripts, refreshProject, setPrimaryCommand, setProjectOverride } from "@/lib/tauri";
-import type { ErrorPayload, Project, ProjectScripts } from "@/types";
+import type { ErrorPayload, Project, ProjectScripts, StartOption } from "@/types";
+import { groupBySource, SOURCE_LABEL } from "./start-options";
 import { useEditors } from "./use-editors";
+import { useTerminals } from "./use-terminals";
 
 const DEFAULT_EDITOR = "default";
+const DEFAULT_TERMINAL = "default";
+
 const HOST_PORT = /^[\w.-]+(?::\d{1,5})?(?:[/?#]\S*)?$|^\[[0-9a-fA-F:.]+\](?::\d{1,5})?(?:[/?#]\S*)?$/;
 
 /**
@@ -57,7 +62,7 @@ type ScriptsState =
   | { status: "error"; data: null; error: ErrorPayload }
   | { status: "ready"; data: ProjectScripts };
 
-/** Primary start command: pick a package.json script. Each change applies immediately. */
+/** Start command: pick one discovered start option, grouped by where it was found. */
 function PrimaryCommandSection({
   project,
   onError,
@@ -86,12 +91,12 @@ function PrimaryCommandSection({
   }, [project.id, attempt]);
 
   const choose = useCallback(
-    async (script: string | null) => {
+    async (option: StartOption | null) => {
       setPending(true);
       onError(null);
       try {
-        await setPrimaryCommand(project.id, script);
-        toast.success(script === null ? "Start command cleared" : `Start command set to ${script}`);
+        await setPrimaryCommand(project.id, option?.id ?? null);
+        toast.success(option === null ? "Start command cleared" : `Start command set to ${option.label}`);
         setAttempt((n) => n + 1);
       } catch (failure) {
         onError(toErrorPayload(failure));
@@ -103,17 +108,19 @@ function PrimaryCommandSection({
   );
 
   const data = state.data;
+  const groups = data === null ? [] : groupBySource(data.options);
+  const usesPackageManager = data?.options.some((option) => option.source === "packageJson") ?? false;
   return (
     <section className="space-y-2 rounded-lg border p-3" aria-labelledby={groupId}>
       <div className="flex items-center justify-between gap-2">
         <h3 id={groupId} className="font-medium">
-          Primary start command
+          Start command
         </h3>
         <Button
           type="button"
           variant="ghost"
           size="xs"
-          disabled={pending || data === null || data.primaryScript === null}
+          disabled={pending || data === null || data.primaryOption === null}
           onClick={() => void choose(null)}
         >
           Clear
@@ -124,7 +131,7 @@ function PrimaryCommandSection({
       </p>
 
       {state.status === "loading" && (
-        <div role="status" aria-label="Loading scripts" className="space-y-1.5">
+        <div role="status" aria-label="Loading start options" className="space-y-1.5">
           <Skeleton className="h-6 w-full" />
           <Skeleton className="h-6 w-full" />
         </div>
@@ -134,35 +141,54 @@ function PrimaryCommandSection({
       )}
       {data !== null && (
         <>
-          <p className="text-xs text-muted-foreground">
-            Package manager: <Mono>{data.packageManager}</Mono>
-            {!data.packageManagerDetected && " (assumed: no lockfile found)"}
-          </p>
-          {data.scripts.length === 0 ? (
+          {usesPackageManager && (
+            <p className="text-xs text-muted-foreground">
+              Package manager: <Mono>{data.packageManager}</Mono>
+              {!data.packageManagerDetected && " (assumed: no lockfile found)"}
+            </p>
+          )}
+          {data.options.length === 0 ? (
             <p className="text-muted-foreground">
-              No package.json scripts found. LocalDeck v0.1 reads start commands from package.json scripts.
+              No start options found. LocalDeck reads package.json scripts, Makefile targets, justfile recipes,
+              composer.json scripts, Cargo.toml (crates with a binary), docker-compose files and Python project
+              scripts (pyproject.toml) in the project root.
             </p>
           ) : (
-            <div role="radiogroup" aria-labelledby={groupId} className="max-h-44 space-y-0.5 overflow-y-auto">
-              {data.scripts.map((script) => (
-                <label
-                  key={script.name}
-                  className="flex cursor-pointer items-baseline gap-2 rounded-md px-1.5 py-1 hover:bg-muted/60"
-                >
-                  <input
-                    type="radio"
-                    name={`${groupId}-script`}
-                    className="translate-y-0.5 accent-primary"
-                    checked={data.primaryScript === script.name}
-                    disabled={pending}
-                    onChange={() => void choose(script.name)}
-                  />
-                  <span className="font-medium">{script.name}</span>
-                  <Mono className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={script.command}>
-                    {script.command}
-                  </Mono>
-                </label>
-              ))}
+            <div className="max-h-52 space-y-2 overflow-y-auto">
+              {groups.map((group) => {
+                const headingId = `${groupId}-${group.source}`;
+                return (
+                  <div key={group.source} role="radiogroup" aria-labelledby={headingId} className="space-y-0.5">
+                    <p id={headingId} className="px-1.5 text-xs font-medium text-muted-foreground">
+                      {SOURCE_LABEL[group.source]}
+                    </p>
+                    {group.options.map((option) => (
+                      <label
+                        key={option.id}
+                        className="flex cursor-pointer items-baseline gap-2 rounded-md px-1.5 py-1 hover:bg-muted/60"
+                      >
+                        <input
+                          type="radio"
+                          name={`${groupId}-option`}
+                          className="translate-y-0.5 accent-primary"
+                          checked={data.primaryOption === option.id}
+                          disabled={pending}
+                          onChange={() => void choose(option)}
+                        />
+                        <Mono className="font-medium">{option.label}</Mono>
+                        {option.detail && (
+                          <Mono
+                            className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+                            title={option.detail}
+                          >
+                            {option.detail}
+                          </Mono>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                );
+              })}
             </div>
           )}
         </>
@@ -178,14 +204,17 @@ function SettingsForm({
   project: Project;
   onOpenChange: (open: boolean) => void;
 }) {
-  const ids = { name: useId(), url: useId(), editor: useId() };
+  const ids = { name: useId(), url: useId(), editor: useId(), terminal: useId(), restart: useId() };
   const [displayName, setDisplayName] = useState(project.overrides.displayName ?? "");
   const [primaryUrl, setPrimaryUrl] = useState(project.overrides.primaryUrl ?? "");
   const [editor, setEditor] = useState(project.overrides.preferredEditor ?? DEFAULT_EDITOR);
+  const [terminal, setTerminal] = useState(project.overrides.preferredTerminal ?? DEFAULT_TERMINAL);
+  const [autoRestart, setAutoRestart] = useState(project.overrides.autoRestart);
   const [urlProblem, setUrlProblem] = useState<string | null>(null);
   const [error, setError] = useState<ErrorPayload | null>(null);
   const [busy, setBusy] = useState<"save" | "refresh" | null>(null);
   const editors = useEditors();
+  const terminals = useTerminals();
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -199,6 +228,8 @@ function SettingsForm({
         displayName: displayName.trim() || null,
         primaryUrl: primaryUrl.trim() || null,
         preferredEditor: editor === DEFAULT_EDITOR ? null : editor,
+        preferredTerminal: terminal === DEFAULT_TERMINAL ? null : terminal,
+        autoRestart,
       });
       toast.success("Project settings saved");
       onOpenChange(false);
@@ -223,6 +254,7 @@ function SettingsForm({
   };
 
   const known = editors.editors?.some((candidate) => candidate.id === editor) ?? false;
+  const terminalKnown = terminals.terminals?.some((candidate) => candidate.id === terminal) ?? false;
 
   return (
     <form onSubmit={(event) => void save(event)} className="grid gap-3">
@@ -289,6 +321,54 @@ function SettingsForm({
         )}
       </div>
 
+      <div className="grid gap-1.5">
+        <Label htmlFor={ids.terminal}>Terminal</Label>
+        <Select
+          value={terminal}
+          onValueChange={setTerminal}
+          disabled={terminals.loading && terminals.terminals === null}
+        >
+          <SelectTrigger id={ids.terminal} className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper">
+            <SelectItem value={DEFAULT_TERMINAL}>Use global default</SelectItem>
+            {terminals.terminals?.map((candidate) => (
+              <SelectItem key={candidate.id} value={candidate.id}>
+                {candidate.name}
+                {!candidate.available && <span className="text-muted-foreground"> · not installed</span>}
+              </SelectItem>
+            ))}
+            {terminals.terminals && terminal !== DEFAULT_TERMINAL && !terminalKnown && (
+              <SelectItem value={terminal}>{terminal} · unknown</SelectItem>
+            )}
+          </SelectContent>
+        </Select>
+        {terminals.error && (
+          <p className="text-xs text-destructive">
+            Couldn't list terminals: {terminals.error.message}{" "}
+            <button type="button" className="underline" onClick={terminals.reload}>
+              Retry
+            </button>
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-start justify-between gap-3">
+        <div className="grid gap-0.5">
+          <Label htmlFor={ids.restart}>Auto-restart</Label>
+          <p id={`${ids.restart}-help`} className="text-xs text-muted-foreground">
+            Restarts commands started from LocalDeck if they crash: up to 5 attempts with increasing delay.
+          </p>
+        </div>
+        <Switch
+          id={ids.restart}
+          checked={autoRestart}
+          onCheckedChange={setAutoRestart}
+          aria-describedby={`${ids.restart}-help`}
+        />
+      </div>
+
       <PrimaryCommandSection project={project} onError={setError} />
 
       {error && <InlineError error={error} />}
@@ -311,7 +391,7 @@ function SettingsForm({
   );
 }
 
-/** Per-project overrides (name, URL, editor) and the primary start command. */
+/** Per-project overrides (name, URL, editor, terminal, auto-restart) and the start command. */
 export function ProjectSettingsDialog({
   project,
   open,

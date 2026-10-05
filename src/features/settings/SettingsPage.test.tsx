@@ -5,7 +5,7 @@ import { useRuntimeStore } from "@/stores/runtime-store";
 import { backend } from "@/test/backend";
 import { makeProject, makeScanner, makeSettings, makeSnapshot } from "@/test/fixtures";
 import { renderWithProviders } from "@/test/render";
-import type { AppSnapshot, EditorInfo, Settings } from "@/types";
+import type { AppSnapshot, EditorInfo, ImportReport, Settings, TerminalInfo } from "@/types";
 import { SettingsPage } from "./SettingsPage";
 
 // Sonner keeps toasts in module state and replays them to the next <Toaster>.
@@ -19,6 +19,12 @@ const EDITORS: EditorInfo[] = [
   { id: "zed", name: "Zed", available: false },
 ];
 
+const TERMINALS: TerminalInfo[] = [
+  { id: "terminal", name: "Terminal", available: true },
+  { id: "iterm", name: "iTerm2", available: true },
+  { id: "warp", name: "Warp", available: false },
+];
+
 /** Backend that echoes `update_settings` like the real one (validated full replace). */
 function backendSavesSettings() {
   backend.handle("update_settings", (args) => args?.settings);
@@ -29,10 +35,13 @@ async function setup({
   settings = makeSettings(),
   snapshot = makeSnapshot(),
   editors = EDITORS,
-}: { settings?: Settings; snapshot?: AppSnapshot; editors?: EditorInfo[] } = {}) {
+  terminals = TERMINALS,
+}: { settings?: Settings; snapshot?: AppSnapshot; editors?: EditorInfo[]; terminals?: TerminalInfo[] } = {}) {
   backend.reply("list_editors", editors);
+  backend.reply("list_terminals", terminals);
   const view = renderWithProviders(<SettingsPage />, { settings, snapshot, toaster: true });
   await screen.findByText(/Used by “Open in editor”|No supported editor|Couldn't list editors/);
+  await screen.findByText(/Used by “Open terminal”|No supported terminal|Couldn't list terminals/);
   return view;
 }
 
@@ -50,7 +59,7 @@ describe("appearance and startup", () => {
 
     await waitFor(() => expect(savedSettings()?.theme).toBe("dark"));
     expect(backend.callsTo("update_settings")).toEqual([
-      { settings: { theme: "dark", launchAtLogin: true, preferredEditor: "cursor", forgetAfterDays: 30 } },
+      { settings: makeSettings({ theme: "dark", launchAtLogin: true, preferredEditor: "cursor", forgetAfterDays: 30 }) },
     ]);
     expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
   });
@@ -141,6 +150,243 @@ describe("preferred editor", () => {
     renderWithProviders(<SettingsPage />, { settings: makeSettings(), snapshot: makeSnapshot() });
     expect(await screen.findByText(/Couldn't list editors: catalogue unreadable/)).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Preferred editor" })).toBeInTheDocument();
+  });
+});
+
+describe("notifications", () => {
+  test("the switch saves notificationsEnabled", async () => {
+    backendSavesSettings();
+    const { user } = await setup();
+    const toggle = screen.getByRole("switch", { name: "Desktop notifications" });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await waitFor(() => expect(savedSettings()?.notificationsEnabled).toBe(false));
+    expect(backend.callsTo("update_settings")).toEqual([{ settings: makeSettings({ notificationsEnabled: false }) }]);
+    expect(await screen.findByText("Notifications off")).toBeInTheDocument();
+  });
+});
+
+describe("global shortcut", () => {
+  const macSnapshot = () => makeSnapshot({ scanner: makeScanner({ platform: "macos" }) });
+  const linuxSnapshot = () => makeSnapshot({ scanner: makeScanner({ platform: "linux" }) });
+
+  test("shows the saved accelerator the way the platform writes it", async () => {
+    await setup({ settings: makeSettings({ globalShortcut: "CommandOrControl+Shift+K" }), snapshot: macSnapshot() });
+    expect(screen.getByRole("button", { name: "Global shortcut" })).toHaveTextContent("⌘⇧K");
+  });
+
+  test("records a combination and saves it as an accelerator", async () => {
+    backendSavesSettings();
+    const { user } = await setup({ snapshot: linuxSnapshot() });
+    const field = screen.getByRole("button", { name: "Global shortcut" });
+    expect(field).toHaveTextContent("Not set");
+
+    await user.click(field);
+    expect(field).toHaveTextContent("Press a shortcut…");
+    await user.keyboard("{Control>}{Shift>}k{/Shift}{/Control}");
+
+    await waitFor(() => expect(savedSettings()?.globalShortcut).toBe("CommandOrControl+Shift+K"));
+    expect(backend.callsTo("update_settings")).toEqual([
+      { settings: makeSettings({ globalShortcut: "CommandOrControl+Shift+K" }) },
+    ]);
+    await waitFor(() => expect(field).toHaveTextContent("Ctrl+Shift+K"));
+  });
+
+  test("a bare key is ignored while recording; Esc cancels without saving", async () => {
+    const { user } = await setup({ snapshot: linuxSnapshot() });
+    const field = screen.getByRole("button", { name: "Global shortcut" });
+    await user.click(field);
+    await user.keyboard("k");
+    expect(field).toHaveTextContent("Press a shortcut…");
+    await user.keyboard("{Escape}");
+    expect(field).toHaveTextContent("Not set");
+    expect(backend.callsTo("update_settings")).toHaveLength(0);
+  });
+
+  test("recording ⌘K doesn't toggle the palette underneath", async () => {
+    backendSavesSettings();
+    const { user } = await setup({ snapshot: macSnapshot() });
+    await user.click(screen.getByRole("button", { name: "Global shortcut" }));
+    await user.keyboard("{Meta>}k{/Meta}");
+    await waitFor(() => expect(savedSettings()?.globalShortcut).toBe("CommandOrControl+K"));
+  });
+
+  test("leaving the field cancels recording", async () => {
+    const { user } = await setup({ snapshot: linuxSnapshot() });
+    const field = screen.getByRole("button", { name: "Global shortcut" });
+    await user.click(field);
+    await user.click(document.body);
+    expect(field).toHaveTextContent("Not set");
+  });
+
+  test("Clear removes the shortcut (null)", async () => {
+    backendSavesSettings();
+    const { user } = await setup({ settings: makeSettings({ globalShortcut: "Alt+Space" }), snapshot: linuxSnapshot() });
+    await user.click(screen.getByRole("button", { name: "Clear shortcut" }));
+    await waitFor(() => expect(savedSettings()?.globalShortcut).toBeNull());
+    expect(screen.queryByRole("button", { name: "Clear shortcut" })).not.toBeInTheDocument();
+  });
+
+  test("a rejected shortcut is explained inline and the control reverts to the saved one", async () => {
+    backend.fail("update_settings", {
+      code: "INVALID_INPUT",
+      message: "Couldn't register “Ctrl+Shift+K”: already in use by another application",
+    });
+    const { user } = await setup({ settings: makeSettings({ globalShortcut: "Alt+Space" }), snapshot: linuxSnapshot() });
+    const field = screen.getByRole("button", { name: "Global shortcut" });
+    await user.click(field);
+    await user.keyboard("{Control>}{Shift>}k{/Shift}{/Control}");
+
+    const inline = await screen.findByRole("alert");
+    expect(inline).toHaveTextContent("already in use by another application");
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveAttribute("aria-describedby", inline.id);
+    await waitFor(() => expect(field).not.toBeDisabled());
+    expect(field).toHaveTextContent("Alt+Space");
+    expect(savedSettings()?.globalShortcut).toBe("Alt+Space");
+
+    // The next attempt starts clean.
+    backendSavesSettings();
+    await user.click(field);
+    await user.keyboard("{Control>}j{/Control}");
+    await waitFor(() => expect(savedSettings()?.globalShortcut).toBe("CommandOrControl+J"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  test("other failures aren't pinned on the field", async () => {
+    backend.fail("update_settings", { code: "DATABASE_ERROR", message: "database is locked" });
+    const { user } = await setup({ snapshot: linuxSnapshot() });
+    await user.click(screen.getByRole("button", { name: "Global shortcut" }));
+    await user.keyboard("{Control>}j{/Control}");
+    expect(await screen.findByText("Local storage error")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Global shortcut" })).not.toHaveAttribute("aria-invalid");
+  });
+});
+
+describe("preferred terminal", () => {
+  test("lists terminals, marks missing ones and saves the choice; System default clears it", async () => {
+    backendSavesSettings();
+    const { user } = await setup();
+    const trigger = screen.getByRole("combobox", { name: "Preferred terminal" });
+    expect(trigger).toHaveTextContent("System default");
+
+    await user.click(trigger);
+    const warp = await screen.findByRole("option", { name: /Warp/ });
+    expect(warp).toHaveTextContent("not installed");
+    expect(warp).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("option", { name: "iTerm2" }));
+    await waitFor(() => expect(savedSettings()?.preferredTerminal).toBe("iterm"));
+    expect(backend.callsTo("update_settings")).toEqual([{ settings: makeSettings({ preferredTerminal: "iterm" }) }]);
+
+    await waitFor(() => expect(trigger).not.toBeDisabled());
+    await user.click(trigger);
+    await user.click(await screen.findByRole("option", { name: "System default" }));
+    await waitFor(() => expect(savedSettings()?.preferredTerminal).toBeNull());
+  });
+
+  test("a saved terminal that is no longer installed stays selectable", async () => {
+    await setup({ settings: makeSettings({ preferredTerminal: "warp" }) });
+    expect(screen.getByRole("combobox", { name: "Preferred terminal" })).toHaveTextContent("Warp");
+  });
+
+  test("a failing terminal list is reported without breaking the page", async () => {
+    backend.reply("list_editors", EDITORS);
+    backend.fail("list_terminals", { code: "UNSUPPORTED_OPERATION", message: "catalogue unreadable" });
+    renderWithProviders(<SettingsPage />, { settings: makeSettings(), snapshot: makeSnapshot() });
+    expect(await screen.findByText(/Couldn't list terminals: catalogue unreadable/)).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Preferred terminal" })).toBeInTheDocument();
+  });
+});
+
+describe("backup", () => {
+  test("copy explains commands are exported as script references, never raw commands", async () => {
+    await setup();
+    const section = screen.getByRole("region", { name: "Backup" });
+    expect(section).toHaveTextContent("script references");
+    expect(section).toHaveTextContent("never as raw commands");
+  });
+
+  test("export toasts the written path", async () => {
+    backend.reply("export_overrides", "/Users/dev/Documents/localdeck-overrides.json");
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Export overrides…" }));
+    expect(await screen.findByText("Overrides exported")).toBeInTheDocument();
+    expect(screen.getByText("/Users/dev/Documents/localdeck-overrides.json")).toBeInTheDocument();
+    expect(backend.callsTo("export_overrides")).toHaveLength(1);
+  });
+
+  test("cancelling the save dialog (null) is silent", async () => {
+    backend.reply("export_overrides", null);
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Export overrides…" }));
+    await waitFor(() => expect(backend.callsTo("export_overrides")).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Export overrides…" })).not.toBeDisabled());
+    expect(screen.queryByText("Overrides exported")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  test("an export failure is reported", async () => {
+    backend.fail("export_overrides", { code: "PATH_NOT_FOUND", message: "Couldn't write the file" });
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Export overrides…" }));
+    expect(await screen.findByText(/Couldn't write the file/)).toBeInTheDocument();
+  });
+
+  test("import opens a report: applied count, settings status and every skipped entry with its reason", async () => {
+    const report: ImportReport = {
+      applied: 2,
+      settingsApplied: false,
+      skipped: [
+        { subject: "/home/dev/gone", reason: "The folder no longer exists" },
+        { subject: "settings", reason: "Unknown terminal “foo”" },
+      ],
+    };
+    backend.reply("import_overrides", report);
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Import overrides…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Import finished" });
+    expect(dialog).toHaveTextContent("2 projects updated, 2 skipped.");
+    expect(dialog).toHaveTextContent("Settings were not changed.");
+    expect(within(dialog).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "/home/dev/goneThe folder no longer exists",
+      "settingsUnknown terminal “foo”",
+    ]);
+    expect(backend.callsTo("get_settings")).toHaveLength(0);
+
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import finished" })).not.toBeInTheDocument());
+  });
+
+  test("imported settings are reloaded so the controls match what was applied", async () => {
+    backend.reply("import_overrides", { applied: 1, settingsApplied: true, skipped: [] } satisfies ImportReport);
+    backend.reply("get_settings", makeSettings({ theme: "dark", notificationsEnabled: false }));
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Import overrides…" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Import finished" });
+    expect(dialog).toHaveTextContent("1 project updated.");
+    expect(dialog).toHaveTextContent("Settings were applied.");
+    expect(within(dialog).queryByRole("list")).not.toBeInTheDocument();
+    await waitFor(() => expect(savedSettings()?.theme).toBe("dark"));
+    expect(savedSettings()?.notificationsEnabled).toBe(false);
+  });
+
+  test("cancelling the open dialog (null) is silent", async () => {
+    backend.reply("import_overrides", null);
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Import overrides…" }));
+    await waitFor(() => expect(backend.callsTo("import_overrides")).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import overrides…" })).not.toBeDisabled());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  test("an import failure is reported and no report opens", async () => {
+    backend.fail("import_overrides", { code: "INVALID_INPUT", message: "Unsupported file version 7" });
+    const { user } = await setup();
+    await user.click(screen.getByRole("button", { name: "Import overrides…" }));
+    expect(await screen.findByText(/Unsupported file version 7/)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
 

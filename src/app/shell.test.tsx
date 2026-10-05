@@ -68,11 +68,13 @@ describe("bootstrap states", () => {
     unmount();
     expect(backend.listenerCount("runtime://updated")).toBe(0);
     expect(backend.listenerCount("ui://open-project")).toBe(0);
+    expect(backend.listenerCount("ui://open-palette")).toBe(0);
+    expect(backend.listenerCount("ui://action-failed")).toBe(0);
   });
 });
 
 describe("routing", () => {
-  test("navigation is exactly Projects, Ports, Settings: no Processes page", async () => {
+  test("navigation is exactly Projects, Ports, Activity, Settings: no Processes page", async () => {
     backendReturns();
     const { user } = renderApp();
     await screen.findByRole("heading", { name: /^Projects/ });
@@ -81,6 +83,7 @@ describe("routing", () => {
     expect(within(nav).getAllByRole("link").map((link) => link.textContent?.replace(/\d+$/, ""))).toEqual([
       "Projects",
       "Ports",
+      "Activity",
       "Settings",
     ]);
     expect(within(nav).getByRole("link", { name: /^Projects/ })).toHaveAttribute("aria-current", "page");
@@ -88,6 +91,11 @@ describe("routing", () => {
     await user.click(within(nav).getByRole("link", { name: /^Ports/ }));
     expect(await screen.findByRole("heading", { name: /^Ports/ })).toBeInTheDocument();
     expect(within(nav).getByRole("link", { name: /^Ports/ })).toHaveAttribute("aria-current", "page");
+
+    backend.reply("list_activity", []);
+    await user.click(within(nav).getByRole("link", { name: "Activity" }));
+    expect(await screen.findByRole("heading", { name: /^Activity/ })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "Activity" })).toHaveAttribute("aria-current", "page");
 
     await user.click(within(nav).getByRole("link", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
@@ -124,6 +132,55 @@ describe("routing", () => {
 
     act(() => backend.emit("ui://open-project", 1));
     expect(await screen.findByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+  });
+});
+
+describe("backend events", () => {
+  test("ui://open-palette (global shortcut) opens the palette, and again leaves it open", async () => {
+    backendReturns();
+    renderApp();
+    await screen.findByRole("heading", { name: /^Projects/ });
+    expect(useUiStore.getState().paletteOpen).toBe(false);
+
+    act(() => backend.emit("ui://open-palette", null));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("Open Activity")).toBeInTheDocument();
+
+    act(() => backend.emit("ui://open-palette", null));
+    expect(useUiStore.getState().paletteOpen).toBe(true);
+  });
+
+  test("ui://action-failed (tray quick action) shows an error toast with the backend's reason", async () => {
+    backendReturns();
+    renderApp();
+    await screen.findByRole("heading", { name: /^Projects/ });
+
+    act(() =>
+      backend.emit("ui://action-failed", { code: "PROCESS_PERMISSION_DENIED", message: "Operation not permitted" }),
+    );
+    expect(await screen.findByText("Permission denied")).toBeInTheDocument();
+    expect(screen.getByText("Operation not permitted")).toBeInTheDocument();
+  });
+
+  test("a malformed ui://action-failed payload is ignored rather than crashing the app", async () => {
+    backendReturns();
+    renderApp();
+    await screen.findByRole("heading", { name: /^Projects/ });
+    act(() => backend.emit("ui://action-failed", "boom"));
+    expect(screen.getByRole("heading", { name: /^Projects/ })).toBeInTheDocument();
+    expect(screen.queryByText("boom")).not.toBeInTheDocument();
+  });
+
+  test("listeners are re-registered on Retry without leaking the old ones", async () => {
+    backend.fail("get_snapshot", { code: "DATABASE_ERROR", message: "locked" });
+    backend.reply("get_settings", makeSettings());
+    const { user } = renderApp();
+    await screen.findByRole("heading", { name: "Local storage error" });
+    backendReturns();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByRole("heading", { name: /^Projects/ });
+    expect(backend.listenerCount("ui://open-palette")).toBe(1);
+    expect(backend.listenerCount("ui://action-failed")).toBe(1);
   });
 });
 

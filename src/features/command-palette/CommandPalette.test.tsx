@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { useUiStore } from "@/stores/ui-store";
 import { backend } from "@/test/backend";
 import {
+  makeCommand,
   makeComponent,
   makePort,
   makeProject,
@@ -206,7 +207,7 @@ describe("project actions", () => {
     backend.reply("restart_project", undefined);
     const { user } = await setup();
     await user.click(option("Restart Anılarım"));
-    await waitFor(() => expect(backend.callsTo("restart_project")).toEqual([{ projectId: 1 }]));
+    await waitFor(() => expect(backend.callsTo("restart_project")).toEqual([{ projectId: 1, profileId: null, port: null }]));
     expect(useUiStore.getState().paletteOpen).toBe(false);
     expect(await screen.findByText("Restarting Anılarım")).toBeInTheDocument();
   });
@@ -235,6 +236,89 @@ describe("project actions", () => {
     const { user } = await setup();
     await user.click(option("Stop PUQ"));
     expect(await screen.findByText("Permission denied")).toBeInTheDocument();
+  });
+});
+
+describe("launch profiles", () => {
+  const profiled = makeProject({
+    id: 5,
+    name: "Stacker",
+    rootPath: "/home/dev/stacker",
+    primaryCommand: makeCommand(),
+    launchProfiles: [
+      { id: "p-dev", name: "Dev stack", commands: [makeCommand({ script: "pkg:dev" })] },
+      { id: "p-empty", name: "Nothing yet", commands: [] },
+    ],
+  });
+  const profiledSnapshot = makeSnapshot({ projects: [profiled, anilarim], ports: [] });
+
+  test("each launch profile of a stopped project is a Start “X” entry that starts that profile", async () => {
+    backend.reply("start_project", undefined);
+    const { user } = await setup({ snapshot: profiledSnapshot });
+    const entry = option(/^Start “Dev stack”/);
+    expect(entry).toHaveTextContent("Stacker");
+    // A profile without commands can't start; it isn't offered.
+    expect(queryOption(/Nothing yet/)).not.toBeInTheDocument();
+
+    await user.click(entry);
+    await waitFor(() =>
+      expect(backend.callsTo("start_project")).toEqual([{ projectId: 5, profileId: "p-dev", port: null }]),
+    );
+    expect(useUiStore.getState().paletteOpen).toBe(false);
+  });
+
+  test("each profile appears exactly once, and the plain Start entry still starts the primary command", async () => {
+    await setup({ snapshot: profiledSnapshot });
+    expect(labels().filter((text) => text.includes("Dev stack"))).toHaveLength(1);
+    expect(option(/^Start Stacker/)).toBeInTheDocument();
+  });
+
+  test("running projects offer no Start entries for their profiles", async () => {
+    const running = { ...profiled, runtimeStatus: "running" as const };
+    await setup({ snapshot: makeSnapshot({ projects: [running], ports: [] }) });
+    expect(queryOption(/Dev stack/)).not.toBeInTheDocument();
+  });
+
+  test("searching a profile name finds it", async () => {
+    const { user } = await setup({ snapshot: profiledSnapshot });
+    await search(user, "dev stack");
+    expect(option(/^Start “Dev stack”/)).toBeInTheDocument();
+    expect(queryOption(/Anılarım/)).not.toBeInTheDocument();
+  });
+});
+
+describe("add project and activity", () => {
+  test("Open Activity navigates to /activity", async () => {
+    const { user } = await setup();
+    await user.click(option("Open Activity"));
+    expect(screen.getByLabelText("location")).toHaveTextContent("/activity");
+    expect(useUiStore.getState().paletteOpen).toBe(false);
+  });
+
+  test("Add project… opens the native picker and navigates to the project it returns", async () => {
+    backend.reply("pick_and_add_project", 7);
+    const { user } = await setup();
+    await user.click(option("Add project…"));
+    await waitFor(() => expect(screen.getByLabelText("location")).toHaveTextContent("/projects/7"));
+    expect(backend.callsTo("pick_and_add_project")).toHaveLength(1);
+  });
+
+  test("a cancelled folder dialog (null) goes nowhere and says nothing", async () => {
+    backend.reply("pick_and_add_project", null);
+    const { user } = await setup();
+    await user.click(option("Add project…"));
+    await waitFor(() => expect(backend.callsTo("pick_and_add_project")).toHaveLength(1));
+    await act(async () => {});
+    expect(screen.getByLabelText("location")).toHaveTextContent("/");
+    expect(screen.getByLabelText("location").textContent).toBe("/");
+  });
+
+  test("a failed add is reported", async () => {
+    backend.fail("pick_and_add_project", { code: "DATABASE_ERROR", message: "disk full" });
+    const { user } = await setup();
+    await user.click(option("Add project…"));
+    expect(await screen.findByText("Local storage error")).toBeInTheDocument();
+    expect(screen.getByLabelText("location").textContent).toBe("/");
   });
 });
 

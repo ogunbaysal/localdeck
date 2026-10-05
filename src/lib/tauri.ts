@@ -5,15 +5,20 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { toErrorPayload } from "./errors";
+import { isErrorPayload, toErrorPayload } from "./errors";
 import type {
+  ActivityEvent,
   AppSnapshot,
   ComponentKind,
   EditorInfo,
+  ErrorPayload,
+  ImportReport,
+  LaunchProfileInput,
   ProjectOverrides,
   ProjectScripts,
   Settings,
   StopReport,
+  TerminalInfo,
 } from "@/types";
 
 export { describeError, isErrorPayload, toErrorPayload } from "./errors";
@@ -21,6 +26,10 @@ export type { UnlistenFn };
 
 export const RUNTIME_UPDATED_EVENT = "runtime://updated";
 export const OPEN_PROJECT_EVENT = "ui://open-project";
+/** Emitted by the global shortcut: show the window and open the command palette. */
+export const OPEN_PALETTE_EVENT = "ui://open-palette";
+/** Emitted when a tray quick action fails (payload: `ErrorPayload`). */
+export const ACTION_FAILED_EVENT = "ui://action-failed";
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -41,6 +50,8 @@ export const updateSettings = (settings: Settings): Promise<Settings> =>
   call("update_settings", { settings });
 
 export const listEditors = (): Promise<EditorInfo[]> => call("list_editors");
+
+export const listTerminals = (): Promise<TerminalInfo[]> => call("list_terminals");
 
 /* ── Project metadata ──────────────────────────────────────────────────── */
 
@@ -77,17 +88,56 @@ export const refreshProject = (projectId: number): Promise<void> =>
 export const listProjectScripts = (projectId: number): Promise<ProjectScripts> =>
   call("list_project_scripts", { projectId });
 
-/** Pick a package.json script as the primary command; `null` clears it. */
-export const setPrimaryCommand = (projectId: number, script: string | null): Promise<void> =>
-  call("set_primary_command", { projectId, script });
+/** Pick a start option (`ProjectScripts.options[].id`, e.g. `pkg:dev`) as the primary command; `null` clears it. */
+export const setPrimaryCommand = (projectId: number, option: string | null): Promise<void> =>
+  call("set_primary_command", { projectId, option });
+
+/** Replace the project's launch profiles. Commands are re-derived from option ids in Rust. */
+export const setLaunchProfiles = (
+  projectId: number,
+  profiles: LaunchProfileInput[],
+): Promise<void> => call("set_launch_profiles", { projectId, profiles });
+
+/** Native folder picker (opened by Rust). Resolves to the project id, or `null` if cancelled. */
+export const pickAndAddProject = (): Promise<number | null> => call("pick_and_add_project");
+
+/** Next free loopback TCP port at or after `preferred` (bind-checked, bounded). */
+export const suggestFreePort = (preferred: number): Promise<number> =>
+  call("suggest_free_port", { preferred });
+
+/* ── Activity and file transfer ────────────────────────────────────────── */
+
+/** Newest first; `projectId` null = all projects; `limit` null = everything retained (≤500). */
+export const listActivity = (
+  projectId: number | null = null,
+  limit: number | null = null,
+): Promise<ActivityEvent[]> => call("list_activity", { projectId, limit });
+
+export const clearActivity = (): Promise<void> => call("clear_activity");
+
+/** Native save dialog (Rust). Resolves to the written path, or `null` if cancelled. */
+export const exportOverrides = (): Promise<string | null> => call("export_overrides");
+
+/** Native open dialog (Rust). Resolves to the report, or `null` if cancelled. */
+export const importOverrides = (): Promise<ImportReport | null> => call("import_overrides");
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────── */
 
-export const startProject = (projectId: number): Promise<void> =>
-  call("start_project", { projectId });
+/**
+ * `profileId`: a launch profile to start (`null`/omitted = the primary command).
+ * `port`: also pass `PORT=<n>` (and `--port <n>` for known dev servers) to the commands.
+ */
+export const startProject = (
+  projectId: number,
+  profileId: string | null = null,
+  port: number | null = null,
+): Promise<void> => call("start_project", { projectId, profileId, port });
 
-export const restartProject = (projectId: number): Promise<void> =>
-  call("restart_project", { projectId });
+export const restartProject = (
+  projectId: number,
+  profileId: string | null = null,
+  port: number | null = null,
+): Promise<void> => call("restart_project", { projectId, profileId, port });
 
 /** Graceful only (SIGTERM). */
 export const stopProject = (projectId: number): Promise<StopReport> =>
@@ -161,3 +211,13 @@ export const listenRuntimeUpdates = (
 /** Emitted when a tray project entry is clicked. Resolves to the unlisten function. */
 export const listenOpenProject = (callback: (projectId: number) => void): Promise<UnlistenFn> =>
   subscribe(OPEN_PROJECT_EVENT, isProjectId, callback);
+
+const isErrorEvent = (payload: unknown): payload is ErrorPayload => isErrorPayload(payload);
+
+/** Global shortcut pressed: the window is already visible; open the palette. */
+export const listenOpenPalette = (callback: () => void): Promise<UnlistenFn> =>
+  subscribe(OPEN_PALETTE_EVENT, (_payload: unknown): _payload is unknown => true, () => callback());
+
+/** A tray quick action failed in Rust. Resolves to the unlisten function. */
+export const listenActionFailed = (callback: (error: ErrorPayload) => void): Promise<UnlistenFn> =>
+  subscribe(ACTION_FAILED_EVENT, isErrorEvent, callback);

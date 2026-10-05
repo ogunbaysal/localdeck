@@ -11,6 +11,9 @@ const KEY_THEME: &str = "theme";
 const KEY_LAUNCH_AT_LOGIN: &str = "launchAtLogin";
 const KEY_PREFERRED_EDITOR: &str = "preferredEditor";
 const KEY_FORGET_AFTER_DAYS: &str = "forgetAfterDays";
+const KEY_PREFERRED_TERMINAL: &str = "preferredTerminal";
+const KEY_NOTIFICATIONS: &str = "notificationsEnabled";
+const KEY_GLOBAL_SHORTCUT: &str = "globalShortcut";
 
 /// Decode a stored value; a missing or invalid one yields `default`.
 fn decode<T: DeserializeOwned>(stored: &HashMap<String, String>, key: &str, default: T) -> T {
@@ -42,6 +45,17 @@ impl Database {
             launch_at_login: decode(&stored, KEY_LAUNCH_AT_LOGIN, defaults.launch_at_login),
             preferred_editor: decode(&stored, KEY_PREFERRED_EDITOR, defaults.preferred_editor),
             forget_after_days: decode(&stored, KEY_FORGET_AFTER_DAYS, defaults.forget_after_days),
+            preferred_terminal: decode(
+                &stored,
+                KEY_PREFERRED_TERMINAL,
+                defaults.preferred_terminal,
+            ),
+            notifications_enabled: decode(
+                &stored,
+                KEY_NOTIFICATIONS,
+                defaults.notifications_enabled,
+            ),
+            global_shortcut: decode(&stored, KEY_GLOBAL_SHORTCUT, defaults.global_shortcut),
         })
     }
 
@@ -52,6 +66,12 @@ impl Database {
             (KEY_LAUNCH_AT_LOGIN, encode(&settings.launch_at_login)?),
             (KEY_PREFERRED_EDITOR, encode(&settings.preferred_editor)?),
             (KEY_FORGET_AFTER_DAYS, encode(&settings.forget_after_days)?),
+            (
+                KEY_PREFERRED_TERMINAL,
+                encode(&settings.preferred_terminal)?,
+            ),
+            (KEY_NOTIFICATIONS, encode(&settings.notifications_enabled)?),
+            (KEY_GLOBAL_SHORTCUT, encode(&settings.global_shortcut)?),
         ];
         let tx = self.conn.transaction()?;
         {
@@ -87,6 +107,9 @@ mod tests {
             launch_at_login: true,
             preferred_editor: Some("vscode".into()),
             forget_after_days: Some(30),
+            preferred_terminal: Some("iterm".into()),
+            notifications_enabled: false,
+            global_shortcut: Some("CommandOrControl+Shift+K".into()),
         };
         {
             let mut db = Database::open(&path).unwrap();
@@ -107,7 +130,7 @@ mod tests {
             .conn
             .query_row("SELECT COUNT(*) FROM settings", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 4);
+        assert_eq!(rows, 7);
     }
 
     #[test]
@@ -118,6 +141,7 @@ mod tests {
             launch_at_login: true,
             preferred_editor: Some("zed".into()),
             forget_after_days: Some(14),
+            ..Settings::default()
         })
         .unwrap();
         for (key, raw) in [

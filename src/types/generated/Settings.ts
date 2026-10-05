@@ -9,4 +9,16 @@ preferredEditor: string | null,
 /**
  * Forget stopped projects not seen for this many days. `None` keeps them forever.
  */
-forgetAfterDays: number | null, };
+forgetAfterDays: number | null, 
+/**
+ * Terminal id from the platform catalogue (`None` = platform default).
+ */
+preferredTerminal: string | null, 
+/**
+ * Native notifications for crashes, conflicts and lost components.
+ */
+notificationsEnabled: boolean, 
+/**
+ * Accelerator such as `CommandOrControl+Shift+K` that summons the palette.
+ */
+globalShortcut: string | null, };

@@ -2,6 +2,7 @@
 import type { ActivityEvent } from "./ActivityEvent";
 import type { AttentionItem } from "./AttentionItem";
 import type { Component } from "./Component";
+import type { LaunchProfile } from "./LaunchProfile";
 import type { Metrics } from "./Metrics";
 import type { PackageManager } from "./PackageManager";
 import type { PrimaryCommand } from "./PrimaryCommand";
@@ -28,4 +29,4 @@ processes: Array<ProcessInfo>,
 /**
  * Sorted listening ports owned by the project.
  */
-ports: Array<number>, primaryUrl: PrimaryUrl | null, primaryCommand: PrimaryCommand | null, overrides: ProjectOverrides, metrics: Metrics, firstSeenAt: number, lastSeenAt: number, favorite: boolean, ignored: boolean, recentActivity: Array<ActivityEvent>, };
+ports: Array<number>, primaryUrl: PrimaryUrl | null, primaryCommand: PrimaryCommand | null, launchProfiles: Array<LaunchProfile>, overrides: ProjectOverrides, metrics: Metrics, firstSeenAt: number, lastSeenAt: number, favorite: boolean, ignored: boolean, recentActivity: Array<ActivityEvent>, };

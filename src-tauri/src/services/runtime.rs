@@ -11,7 +11,8 @@ use crate::engine::{Engine, ScanInput, STOPPED_STACK_TTL};
 use crate::error::{AppError, AppResult, ErrorPayload};
 use crate::models::{
     ActivityEvent, ActivityKind, ActivityMetadata, AppSnapshot, AttentionItem, AttentionKind,
-    Platform, PortInfo, PortOwnership, Project, ProjectId, RootKind, ScannerStatus, Settings,
+    Platform, PortInfo, PortOwnership, PrimaryCommand, Project, ProjectId, RootKind, ScannerStatus,
+    Settings,
 };
 use crate::persistence::{Database, NewActivity, ProjectRecord, ACTIVITY_LIMIT};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -58,9 +59,72 @@ pub(super) struct Entry {
 pub(super) struct ManagedEntry {
     pub child: Child,
     pub pid: u32,
-    pub label: String,
+    pub command: PrimaryCommand,
+    pub env: Vec<(String, String)>,
+    pub profile_id: Option<String>,
+    pub started: Instant,
     pub stop_requested: bool,
 }
+
+/// What LocalDeck last started for a project (repeated by restart).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StartRequest {
+    pub profile_id: Option<String>,
+    pub port: Option<u16>,
+}
+
+pub(super) struct PendingRestart {
+    pub command: PrimaryCommand,
+    pub env: Vec<(String, String)>,
+    pub profile_id: Option<String>,
+    pub due: Instant,
+    pub attempt: u32,
+}
+
+#[derive(Default)]
+pub(super) struct RestartBook {
+    pub attempts: u32,
+    pub pending: Vec<PendingRestart>,
+}
+
+/// Auto-restart pacing. Injectable so tests do not wait for real delays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartPolicy {
+    pub base_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+    pub max_attempts: u32,
+    /// A run at least this long resets the attempt counter.
+    pub reset_after: std::time::Duration,
+}
+
+impl Default for RestartPolicy {
+    fn default() -> Self {
+        Self {
+            base_delay: std::time::Duration::from_secs(2),
+            max_delay: std::time::Duration::from_secs(30),
+            max_attempts: 5,
+            reset_after: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
+impl RestartPolicy {
+    /// `base · 2^(attempt-1)`, capped.
+    pub fn delay(&self, attempt: u32) -> std::time::Duration {
+        let factor = 1u32 << attempt.saturating_sub(1).min(16);
+        self.base_delay.saturating_mul(factor).min(self.max_delay)
+    }
+}
+
+/// A user-facing alert produced by a scan; delivered natively by the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserNotification {
+    pub project_id: ProjectId,
+    pub title: String,
+    pub body: String,
+}
+
+const MAX_PENDING_NOTIFICATIONS: usize = 20;
 
 pub(super) struct TransientItem {
     pub item: AttentionItem,
@@ -74,7 +138,9 @@ pub(super) struct State {
     pub tracker: Tracker,
     /// Oldest first, bounded.
     pub activity: VecDeque<ActivityEvent>,
-    pub managed: HashMap<ProjectId, ManagedEntry>,
+    pub managed: HashMap<ProjectId, Vec<ManagedEntry>>,
+    pub restarts: HashMap<ProjectId, RestartBook>,
+    pub last_start: HashMap<ProjectId, StartRequest>,
     pub stop_requests: HashMap<ProjectId, Vec<(u32, Option<i64>)>>,
     pub transient: HashMap<ProjectId, Vec<TransientItem>>,
     pub last_touch: HashMap<ProjectId, i64>,
@@ -84,6 +150,7 @@ pub(super) struct State {
     pub known_processes: HashMap<u32, Option<i64>>,
     pub live_pids: HashMap<u32, Option<i64>>,
     pub pending_events: Vec<NewActivity>,
+    pub notifications: Vec<UserNotification>,
     pub last_prune_ms: i64,
 }
 
@@ -133,26 +200,85 @@ impl State {
 
     /// Roots of the processes LocalDeck itself spawned.
     pub(super) fn managed_pids(&self) -> HashSet<u32> {
-        self.managed.values().map(|m| m.pid).collect()
+        self.managed.values().flatten().map(|m| m.pid).collect()
     }
 
-    /// Reap exited managed children; unexpected exits become activity + attention.
-    fn reap_managed(&mut self, now_ms: i64) {
-        let mut finished: Vec<(ProjectId, Option<i32>, bool, String)> = Vec::new();
-        for (project, entry) in self.managed.iter_mut() {
-            match entry.child.try_wait() {
-                Ok(Some(status)) => finished.push((
-                    *project,
-                    status.code(),
-                    entry.stop_requested,
-                    entry.label.clone(),
-                )),
-                Ok(None) => {}
-                Err(_) => finished.push((*project, None, true, entry.label.clone())),
+    /// Cancel scheduled auto-restarts and forget the attempt counter.
+    pub(super) fn cancel_restarts(&mut self, id: ProjectId) {
+        self.restarts.remove(&id);
+    }
+
+    /// Count a failed run and either schedule the next attempt or give up.
+    pub(super) fn plan_restart(
+        &mut self,
+        project: ProjectId,
+        entry: PendingRestart,
+        ran_for: std::time::Duration,
+        now: Instant,
+        now_ms: i64,
+        policy: &RestartPolicy,
+    ) {
+        let book = self.restarts.entry(project).or_default();
+        if ran_for >= policy.reset_after {
+            book.attempts = 0;
+        }
+        book.attempts += 1;
+        if book.attempts > policy.max_attempts {
+            book.pending.clear();
+            self.pending_events.push(NewActivity {
+                project_id: Some(project),
+                kind: ActivityKind::AutoRestartGaveUp,
+                metadata: ActivityMetadata {
+                    attempt: Some(policy.max_attempts),
+                    ..Default::default()
+                },
+                created_at: now_ms,
+            });
+            self.push_transient(
+                project,
+                AttentionItem {
+                    id: "auto-restart-gave-up".to_string(),
+                    kind: AttentionKind::AutoRestartGaveUp,
+                    message: format!(
+                        "`{}` kept crashing; auto-restart gave up after {} attempts",
+                        entry.command.label, policy.max_attempts
+                    ),
+                    dismissible: true,
+                },
+                now_ms,
+            );
+            return;
+        }
+        book.pending.push(PendingRestart {
+            due: now + policy.delay(book.attempts),
+            attempt: book.attempts,
+            ..entry
+        });
+    }
+
+    /// Reap exited managed children; unexpected exits become activity +
+    /// attention (and, with auto-restart on, a scheduled restart).
+    fn reap_managed(&mut self, now_ms: i64, now: Instant, policy: &RestartPolicy) {
+        let mut finished: Vec<(ProjectId, ManagedEntry, Option<i32>, bool)> = Vec::new();
+        for (project, entries) in self.managed.iter_mut() {
+            let mut index = 0;
+            while index < entries.len() {
+                match entries[index].child.try_wait() {
+                    Ok(Some(status)) => {
+                        let entry = entries.remove(index);
+                        let expected = entry.stop_requested;
+                        finished.push((*project, entry, status.code(), expected));
+                    }
+                    Ok(None) => index += 1,
+                    Err(_) => {
+                        let entry = entries.remove(index);
+                        finished.push((*project, entry, None, true));
+                    }
+                }
             }
         }
-        for (project, code, expected, label) in finished {
-            self.managed.remove(&project);
+        self.managed.retain(|_, entries| !entries.is_empty());
+        for (project, entry, code, expected) in finished {
             if expected {
                 continue;
             }
@@ -174,11 +300,35 @@ impl State {
                 AttentionItem {
                     id: "managed-exited".to_string(),
                     kind: AttentionKind::ManagedExited,
-                    message: format!("`{label}` {how} without being stopped from LocalDeck"),
+                    message: format!(
+                        "`{}` {how} without being stopped from LocalDeck",
+                        entry.command.label
+                    ),
                     dismissible: true,
                 },
                 now_ms,
             );
+            let auto = self
+                .registry
+                .get(&project)
+                .is_some_and(|e| e.record.auto_restart);
+            if auto {
+                let ran_for = now.saturating_duration_since(entry.started);
+                self.plan_restart(
+                    project,
+                    PendingRestart {
+                        command: entry.command,
+                        env: entry.env,
+                        profile_id: entry.profile_id,
+                        due: now,
+                        attempt: 0,
+                    },
+                    ran_for,
+                    now,
+                    now_ms,
+                    policy,
+                );
+            }
         }
     }
 
@@ -204,6 +354,8 @@ pub struct Runtime {
     pub(super) state: Mutex<State>,
     snapshot: RwLock<Arc<AppSnapshot>>,
     pub(super) settings: Mutex<Settings>,
+    pub(super) restart_policy: Mutex<RestartPolicy>,
+    pub pacing: super::pacing::Pacing,
     scan_trigger: Mutex<Option<Sender<()>>>,
     /// Startup-time storage problem (for example the database could not be
     /// opened and LocalDeck fell back to in-memory state). Always surfaced.
@@ -252,9 +404,16 @@ impl Runtime {
             state: Mutex::new(state),
             snapshot: RwLock::new(Arc::new(empty_snapshot(Platform::current()))),
             settings: Mutex::new(settings),
+            restart_policy: Mutex::new(RestartPolicy::default()),
+            pacing: super::pacing::Pacing::default(),
             scan_trigger: Mutex::new(None),
             persistence_notice: Mutex::new(None),
         })
+    }
+
+    /// Replace the auto-restart pacing (tests).
+    pub fn set_restart_policy(&self, policy: RestartPolicy) {
+        *lock(&self.restart_policy) = policy;
     }
 
     pub fn set_persistence_notice(&self, notice: ErrorPayload) {
@@ -283,6 +442,32 @@ impl Runtime {
         lock(&self.settings).clone()
     }
 
+    /// Alerts produced since the last call (the shell shows them natively).
+    pub fn drain_notifications(&self) -> Vec<UserNotification> {
+        std::mem::take(&mut lock(&self.state).notifications)
+    }
+
+    /// Recent activity, newest first; optionally for a single project.
+    pub fn list_activity(&self, project_id: Option<ProjectId>, limit: usize) -> Vec<ActivityEvent> {
+        lock(&self.state)
+            .activity
+            .iter()
+            .rev()
+            .filter(|e| project_id.is_none() || e.project_id == project_id)
+            .take(limit.min(ACTIVITY_LIMIT))
+            .cloned()
+            .collect()
+    }
+
+    pub fn clear_activity(&self) -> AppResult<()> {
+        let mut st = lock(&self.state);
+        lock(&self.db).clear_activity()?;
+        st.activity.clear();
+        drop(st);
+        self.request_scan();
+        Ok(())
+    }
+
     pub fn find_project(&self, id: ProjectId) -> AppResult<Project> {
         self.snapshot()
             .projects
@@ -299,7 +484,8 @@ impl Runtime {
         // 1. Reap managed children; collect what the engine needs from state.
         let (managed_roots, known_paths) = {
             let mut st = lock(&self.state);
-            st.reap_managed(now_ms);
+            let policy = *lock(&self.restart_policy);
+            st.reap_managed(now_ms, now, &policy);
             st.live_pids = scan
                 .processes
                 .iter()
@@ -530,11 +716,38 @@ impl Runtime {
         } else if !new_events.is_empty() || !root_ids.is_empty() {
             st.persistence_error = None;
         }
+        if lock(&self.settings).notifications_enabled {
+            for event in &new_events {
+                let notify = matches!(
+                    event.kind,
+                    ActivityKind::ManagedExited
+                        | ActivityKind::PortConflict
+                        | ActivityKind::RuntimeLost
+                        | ActivityKind::AutoRestartGaveUp
+                );
+                let Some(project_id) = event.project_id.filter(|_| notify) else {
+                    continue;
+                };
+                let Some(project) = projects.iter().find(|p| p.id == project_id) else {
+                    continue;
+                };
+                st.notifications.push(UserNotification {
+                    project_id,
+                    title: project.name.clone(),
+                    body: ActivityEvent::describe(event.kind, &event.metadata),
+                });
+            }
+            let excess = st
+                .notifications
+                .len()
+                .saturating_sub(MAX_PENDING_NOTIFICATIONS);
+            st.notifications.drain(..excess);
+        }
         let snapshot = Arc::new(AppSnapshot {
             projects,
             ports,
             scanner: ScannerStatus {
-                interval_ms: SCAN_INTERVAL_MS,
+                interval_ms: self.pacing.current_ms(),
                 scan_count: st.scan_count,
                 last_scan_ms: scan.duration_ms,
                 process_access: output.access,
@@ -823,5 +1036,52 @@ mod tests {
         let runtime = Runtime::new(Database::open_in_memory().unwrap(), engine()).unwrap();
         let err = runtime.find_project(42).unwrap_err();
         assert_eq!(err.code(), crate::error::ErrorCode::ProjectNotFound);
+    }
+
+    #[test]
+    fn crash_events_become_notifications_only_when_enabled_and_activity_is_listable() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = project_dir(&tmp);
+        let runtime = Runtime::new(Database::open_in_memory().unwrap(), engine()).unwrap();
+        runtime.apply_scan(running_scan(&cwd));
+        let id = runtime.snapshot().projects[0].id;
+        // Starting is not alert-worthy.
+        assert!(runtime.drain_notifications().is_empty());
+        lock(&runtime.state).pending_events.push(NewActivity {
+            project_id: Some(id),
+            kind: ActivityKind::ManagedExited,
+            metadata: ActivityMetadata {
+                exit_code: Some(2),
+                ..Default::default()
+            },
+            created_at: 5,
+        });
+        runtime.apply_scan(running_scan(&cwd));
+        let alerts = runtime.drain_notifications();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].title, "Anilarim");
+        assert!(alerts[0].body.contains("code 2"));
+        assert!(runtime.drain_notifications().is_empty(), "drained once");
+
+        let mut settings = runtime.settings();
+        settings.notifications_enabled = false;
+        runtime.update_settings(settings).unwrap();
+        lock(&runtime.state).pending_events.push(NewActivity {
+            project_id: Some(id),
+            kind: ActivityKind::ManagedExited,
+            metadata: ActivityMetadata::default(),
+            created_at: 6,
+        });
+        runtime.apply_scan(running_scan(&cwd));
+        assert!(runtime.drain_notifications().is_empty());
+
+        let all = runtime.list_activity(None, 100);
+        assert!(all.len() >= 3);
+        assert!(all.windows(2).all(|w| w[0].id > w[1].id), "newest first");
+        assert_eq!(runtime.list_activity(Some(id), 1).len(), 1);
+        assert!(runtime.list_activity(Some(id + 100), 10).is_empty());
+        runtime.clear_activity().unwrap();
+        assert!(runtime.list_activity(None, 10).is_empty());
+        assert_eq!(lock(&runtime.db).activity_count().unwrap(), 0);
     }
 }

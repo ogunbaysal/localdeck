@@ -4,7 +4,7 @@
 //! comparing a cheap metadata signature of the marker files (see [`StackCache`]).
 
 use super::project_detector::read_small;
-use crate::models::{PackageManager, PackageScript, PrimaryCommand, StackTag};
+use crate::models::{PackageManager, PackageScript, StackTag};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -508,26 +508,6 @@ pub fn detect_stack(root: &Path) -> StackFingerprint {
     }
 }
 
-/// Normalised spawn representation of a `package.json` script:
-/// `<package-manager> run <script>` from the project root. No shell involved.
-pub fn primary_command_for_script(
-    root: &Path,
-    fingerprint: &StackFingerprint,
-    script: &str,
-) -> Option<PrimaryCommand> {
-    fingerprint.script(script)?;
-    let manager = fingerprint.package_manager?;
-    let program = manager.program().to_string();
-    let args = vec!["run".to_string(), script.to_string()];
-    Some(PrimaryCommand {
-        label: format!("{program} run {script}"),
-        program,
-        args,
-        cwd: root.to_string_lossy().to_string(),
-        script: Some(script.to_string()),
-    })
-}
-
 type Signature = Vec<Option<(u128, u64)>>;
 
 fn signature(root: &Path) -> Signature {
@@ -769,22 +749,6 @@ mod tests {
         let names: Vec<&str> = fp.scripts.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["dev", "build", "lint", "test"]);
         assert_eq!(fp.script("dev").unwrap().command, "vite");
-    }
-
-    #[test]
-    fn primary_command_uses_detected_manager_and_project_root_without_a_shell() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("my app");
-        write(&root, "package.json", r#"{"scripts":{"dev":"vite"}}"#);
-        write(&root, "pnpm-lock.yaml", "");
-        let fp = detect_stack(&root);
-        let cmd = primary_command_for_script(&root, &fp, "dev").unwrap();
-        assert_eq!(cmd.program, "pnpm");
-        assert_eq!(cmd.args, vec!["run", "dev"]);
-        assert_eq!(cmd.cwd, root.to_string_lossy());
-        assert_eq!(cmd.label, "pnpm run dev");
-        assert_eq!(cmd.script.as_deref(), Some("dev"));
-        assert!(primary_command_for_script(&root, &fp, "missing").is_none());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { LayoutGrid, Network, PanelLeftClose, PanelLeftOpen, Settings, type LucideIcon } from "lucide-react";
+import { History, LayoutGrid, Network, PanelLeftClose, PanelLeftOpen, Settings, type LucideIcon } from "lucide-react";
 import { Link, useLocation } from "react-router";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -51,7 +51,7 @@ function NavItem({ to, label, icon: Icon, active, collapsed, badge }: NavItemPro
   );
 }
 
-/** Left navigation: Projects, Ports, ── , Settings. Icon-only when `collapsed`. */
+/** Left navigation: Projects, Ports, Activity, ── , Settings. Icon-only when `collapsed`. */
 export function Sidebar({ collapsed, autoCollapsed }: { collapsed: boolean; autoCollapsed: boolean }) {
   const { pathname } = useLocation();
   const runningCount = useRuntimeStore(
@@ -71,6 +71,7 @@ export function Sidebar({ collapsed, autoCollapsed }: { collapsed: boolean; auto
     >
       <NavItem to="/" label="Projects" icon={LayoutGrid} active={projectsActive} collapsed={collapsed} badge={runningCount} />
       <NavItem to="/ports" label="Ports" icon={Network} active={pathname === "/ports"} collapsed={collapsed} />
+      <NavItem to="/activity" label="Activity" icon={History} active={pathname === "/activity"} collapsed={collapsed} />
       <Separator className="my-1.5" />
       <NavItem to="/settings" label="Settings" icon={Settings} active={pathname === "/settings"} collapsed={collapsed} />
 

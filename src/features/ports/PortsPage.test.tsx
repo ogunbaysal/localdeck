@@ -68,6 +68,8 @@ function LocationProbe() {
 }
 
 function setup(overrides: Parameters<typeof makeSnapshot>[0] = {}) {
+  // The detail panel asks for the next free port; port + 1 is "free" unless a test re-registers it after setup().
+  backend.handle("suggest_free_port", (args) => args?.preferred);
   return renderWithProviders(
     <>
       <PortsPage />
@@ -247,10 +249,11 @@ describe("port detail", () => {
     expect(screen.queryByRole("region", { name: "Port 3000 details" })).not.toBeInTheDocument();
   });
 
-  test("a preselected port (palette reveal) opens its panel", () => {
+  test("a preselected port (palette reveal) opens its panel", async () => {
     useUiStore.getState().selectPort("tcp:5432");
     setup();
     expect(screen.getByRole("region", { name: "Port 5432 details" })).toBeInTheDocument();
+    await screen.findByText(/Next free port:/);
   });
 
   test("Open URL asks the backend to open that port", async () => {
@@ -325,6 +328,69 @@ describe("port detail", () => {
     await user.click(screen.getByRole("button", { name: "Terminate next (pid 1234)" }));
     expect(await screen.findByText("Permission denied")).toBeInTheDocument();
     expect(screen.getByText(/Operation not permitted/)).toBeInTheDocument();
+  });
+});
+
+describe("port-conflict help and copy helpers", () => {
+  test("the panel asks for a free port after this one, once, when it opens", async () => {
+    const { user } = setup();
+    backend.handle("suggest_free_port", () => 3003);
+    expect(backend.callsTo("suggest_free_port")).toHaveLength(0);
+
+    await user.click(screen.getByRole("button", { name: "Port 3000" }));
+    const panel = screen.getByRole("region", { name: "Port 3000 details" });
+    expect(await within(panel).findByText(/Next free port:/)).toHaveTextContent("Next free port: 3003");
+    expect(backend.callsTo("suggest_free_port")).toEqual([{ preferred: 3001 }]);
+
+    await user.click(within(panel).getByRole("button", { name: "Copy free port" }));
+    expect(await navigator.clipboard.readText()).toBe("3003");
+  });
+
+  test("a failed lookup is explained in place and the rest of the panel still works", async () => {
+    const { user } = setup();
+    backend.handle("suggest_free_port", () => {
+      throw { code: "PORT_SCAN_FAILED", message: "no free port found" };
+    });
+    await user.click(screen.getByRole("button", { name: "Port 3000" }));
+    const panel = screen.getByRole("region", { name: "Port 3000 details" });
+    expect(await within(panel).findByText(/Couldn't find a free port: no free port found/)).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Copy port" })).toBeInTheDocument();
+  });
+
+  test("Copy port and Copy lsof command copy text only: they never run anything", async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole("button", { name: "Port 5432" }));
+    const panel = screen.getByRole("region", { name: "Port 5432 details" });
+
+    await user.click(within(panel).getByRole("button", { name: "Copy port" }));
+    expect(await navigator.clipboard.readText()).toBe("5432");
+    await user.click(within(panel).getByRole("button", { name: "Copy lsof command" }));
+    expect(await navigator.clipboard.readText()).toBe("lsof -nP -iTCP:5432 -sTCP:LISTEN");
+    expect(backend.calls.map((call) => call.command).filter((command) => command !== "suggest_free_port")).toEqual([]);
+  });
+
+  test("every PID gets Copy kill command (TERM) and a clearly labelled force-kill command (KILL)", async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole("button", { name: "Port 8080" }));
+    const panel = screen.getByRole("region", { name: "Port 8080 details" });
+
+    const copied = async (pid: number, name: string, process: string) => {
+      await user.click(within(panel).getByRole("button", { name: `Copy commands for ${process} (pid ${pid})` }));
+      await user.click(await screen.findByRole("menuitem", { name }));
+      return navigator.clipboard.readText();
+    };
+    expect(await copied(11, "Copy kill command (SIGTERM)", "node")).toBe("kill -TERM 11");
+    expect(await copied(12, "Copy force-kill command (SIGKILL)", "python")).toBe("kill -KILL 12");
+    expect(backend.callsTo("terminate_process")).toHaveLength(0);
+    expect(backend.callsTo("force_kill_process")).toHaveLength(0);
+  });
+
+  test("a hidden owner has no PID to build commands for", async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole("button", { name: "Port 631" }));
+    const panel = screen.getByRole("region", { name: "Port 631 details" });
+    expect(within(panel).queryByRole("button", { name: /Copy commands for/ })).not.toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Copy lsof command" })).toBeInTheDocument();
   });
 });
 

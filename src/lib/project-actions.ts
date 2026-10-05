@@ -1,6 +1,7 @@
 import {
   Code,
   Copy,
+  CornerDownRight,
   ExternalLink,
   Eye,
   EyeOff,
@@ -17,6 +18,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { announceStopReport, copyToClipboard, runAction } from "./actions";
+import { cdCommand, commandLine } from "./shell-quote";
 import {
   forceStopProject,
   forgetProject,
@@ -39,8 +41,13 @@ export type ProjectActionId =
   | "open-folder"
   | "open-editor"
   | "open-terminal"
+  | "copy-path"
+  | "copy-cd"
+  | "copy-start"
   | "start"
   | "restart"
+  | `start-profile:${string}`
+  | `restart-profile:${string}`
   | "stop"
   | "force-stop"
   | "favorite"
@@ -60,6 +67,8 @@ export interface ProjectActionConfirmation {
 
 export interface ProjectAction {
   id: ProjectActionId;
+  /** Set on `start-profile:<id>` / `restart-profile:<id>`: the launch profile this action runs. */
+  profileId?: string;
   group: ProjectActionGroup;
   label: string;
   icon: LucideIcon;
@@ -161,6 +170,43 @@ export function getProjectActions(
       },
     },
     {
+      id: "copy-path",
+      group: "open",
+      label: "Copy path",
+      icon: Copy,
+      run: async () => {
+        await runAction("Copy path", () => copyToClipboard(project.rootPath), { success: "Path copied" });
+      },
+    },
+    {
+      id: "copy-cd",
+      group: "open",
+      label: "Copy cd command",
+      icon: CornerDownRight,
+      run: async () => {
+        await runAction("Copy cd command", () => copyToClipboard(cdCommand(project.rootPath)), {
+          success: "cd command copied",
+        });
+      },
+    },
+    {
+      id: "copy-start",
+      group: "open",
+      label: "Copy start command",
+      icon: Copy,
+      disabled: !project.primaryCommand,
+      disabledReason: project.primaryCommand ? undefined : NO_COMMAND,
+      run: async () => {
+        const command = project.primaryCommand;
+        if (!command) return;
+        await runAction(
+          "Copy start command",
+          () => copyToClipboard(commandLine(command.program, command.args)),
+          { success: "Start command copied" },
+        );
+      },
+    },
+    {
       id: "start",
       group: "lifecycle",
       label: "Start",
@@ -197,6 +243,40 @@ export function getProjectActions(
       },
     },
   ];
+
+  // Launch profiles: starting only makes sense while stopped, restarting only while live.
+  for (const profile of project.launchProfiles) {
+    if (stopped) {
+      const empty = profile.commands.length === 0;
+      actions.push({
+        id: `start-profile:${profile.id}`,
+        profileId: profile.id,
+        group: "lifecycle",
+        label: `Start \u201c${profile.name}\u201d`,
+        icon: Play,
+        disabled: empty,
+        disabledReason: empty ? "This profile has no commands" : undefined,
+        run: async () => {
+          await runAction(`Start ${name} (${profile.name})`, () => startProject(id, profile.id), {
+            success: `Starting ${name}: ${profile.name}`,
+          });
+        },
+      });
+    } else {
+      actions.push({
+        id: `restart-profile:${profile.id}`,
+        profileId: profile.id,
+        group: "lifecycle",
+        label: `Restart \u201c${profile.name}\u201d`,
+        icon: RotateCw,
+        run: async () => {
+          await runAction(`Restart ${name} (${profile.name})`, () => restartProject(id, profile.id), {
+            success: `Restarting ${name}: ${profile.name}`,
+          });
+        },
+      });
+    }
+  }
 
   if (project.stopPending) {
     actions.push({
